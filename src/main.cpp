@@ -261,6 +261,9 @@ void writePending(DateTime now, float truckVolts, float battVolts, bool charging
   File f = LittleFS.open(PENDING_FILE, "a");
   if (!f) {
     debugLog("ERROR: Could not open pending file");
+    Serial.println("PENDING_FILE path: " + String(PENDING_FILE));
+    Serial.println("LittleFS total: " + String(LittleFS.totalBytes()) + 
+                  " used: " + String(LittleFS.usedBytes()));
     return;
   }
   f.print(getTimestamp(now));
@@ -586,31 +589,31 @@ void setup() {
     while (1) delay(100);
   }
 
-  if (!LittleFS.begin(false)) {
-    Serial.println("LittleFS mount failed — formatting...");
-    LittleFS.format();
-    if (!LittleFS.begin(false)) {
-      Serial.println("ERROR: LittleFS failed after format");
-      while (1) delay(100);
-    }
+  if (!LittleFS.begin(true)) {  // true = format on fail
+    Serial.println("ERROR: LittleFS failed even with format on fail");
+    while (1) delay(100);
+}
+fsReady = true;
+
+// Verify filesystem is writable
+File testFile = LittleFS.open("/fstest", "w");
+if (!testFile) {
+  Serial.println("LittleFS not writable — forcing format...");
+  fsReady = false;
+  LittleFS.end();
+  LittleFS.format();
+  if (!LittleFS.begin(true)) {
+    Serial.println("ERROR: LittleFS failed after forced format");
+    while (1) delay(100);
   }
   fsReady = true;
+} else {
+  testFile.close();
+  LittleFS.remove("/fstest");
+  Serial.println("LittleFS writable — OK");
+}
 
-  // Verify filesystem is writable
-  File testFile = LittleFS.open("/fstest", "w");
-  if (!testFile) {
-    Serial.println("LittleFS not writable — reformatting...");
-    LittleFS.end();
-    LittleFS.format();
-    if (!LittleFS.begin(false)) {
-      Serial.println("ERROR: LittleFS failed after reformat");
-      while (1) delay(100);
-    }
-    Serial.println("LittleFS reformatted successfully");
-  } else {
-    testFile.close();
-    LittleFS.remove("/fstest");
-  }
+Serial.println("LittleFS total: " + String(LittleFS.totalBytes()) + " used: " + String(LittleFS.usedBytes()));
 
   loadState();
 

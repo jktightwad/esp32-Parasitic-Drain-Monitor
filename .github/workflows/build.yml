@@ -1,0 +1,64 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'include/config.h'
+      - 'platformio.ini'
+      - 'partitions.csv'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Extract version from config.h
+        id: version
+        run: |
+          VERSION=$(grep '#define FIRMWARE_VERSION' include/config.h | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version $VERSION"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v3
+        with:
+          path: ~/.platformio
+          key: platformio-${{ hashFiles('platformio.ini') }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Create secrets.h from template
+        run: |
+          cp include/secrets.h.template include/secrets.h
+          sed -i 's/"network1"/"placeholder"/' include/secrets.h
+          sed -i 's/"password1"/"placeholder"/' include/secrets.h
+          sed -i 's/"your_aio_username"/"placeholder"/' include/secrets.h
+          sed -i 's/"your_aio_key"/"placeholder"/' include/secrets.h
+          sed -i 's/"your_google_script_url"/"placeholder"/' include/secrets.h
+          sed -i 's/"phonenumber@carrier_gateway.com"/"placeholder"/' include/secrets.h
+
+      - name: Build firmware
+        run: platformio run
+
+      - name: Copy firmware to release folder
+        run: |
+          mkdir -p firmware
+          cp .pio/build/esp32-c3-devkitm-1/firmware.bin firmware/firmware.bin
+          echo "${{ steps.version.outputs.version }}" > firmware/version.txt
+
+      - name: Commit firmware files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add firmware/firmware.bin firmware/version.txt
+          git diff --staged --quiet || git commit -m "firmware: build ${{ steps.version.outputs.version }}"
+          git push

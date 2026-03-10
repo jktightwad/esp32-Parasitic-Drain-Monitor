@@ -10,6 +10,10 @@
 // ===== FIRMWARE =====
 #define FIRMWARE_VERSION    "1.0"
 
+// ===== OTA =====
+#define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
+#define OTA_FIRMWARE_URL "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/firmware.bin"
+
 // ===== PINS =====
 #define PIN_TRUCK_SOURCE     0
 #define PIN_TRUCK_ADC        1
