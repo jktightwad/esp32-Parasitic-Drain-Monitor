@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <Update.h>
 #include "esp_adc_cal.h"
 #include <Wire.h>
 #include <RTClib.h>
@@ -32,6 +33,26 @@ bool fsReady = false;
 // ===== WATCHDOG =====
 void feedWatchdog() {
   esp_task_wdt_reset();
+}
+
+// ===== VERSION PARSING =====
+// Converts "x.y.z" to comparable integer e.g. "1.2.3" -> 10203
+int parseVersion(String v) {
+  v.trim();
+  int major = 0, minor = 0, patch = 0;
+  int first = v.indexOf('.');
+  int second = v.indexOf('.', first + 1);
+  if (first < 0) {
+    major = v.toInt();
+  } else if (second < 0) {
+    major = v.substring(0, first).toInt();
+    minor = v.substring(first + 1).toInt();
+  } else {
+    major = v.substring(0, first).toInt();
+    minor = v.substring(first + 1, second).toInt();
+    patch = v.substring(second + 1).toInt();
+  }
+  return major * 10000 + minor * 100 + patch;
 }
 
 // ===== DEBUG LOGGING =====
@@ -258,14 +279,23 @@ void writePending(DateTime now, float truckVolts, float battVolts, bool charging
     }
   }
 
-  File f = LittleFS.open(PENDING_FILE, "a");
+  // Retry loop for file creation
+  File f;
+  int retries = 0;
+  while (retries < 3) {
+    f = LittleFS.open(PENDING_FILE, "a");
+    if (f) break;
+    debugLog("Pending open failed — retry " + String(retries + 1));
+    delay(1000);
+    retries++;
+  }
   if (!f) {
-    debugLog("ERROR: Could not open pending file");
-    Serial.println("PENDING_FILE path: " + String(PENDING_FILE));
-    Serial.println("LittleFS total: " + String(LittleFS.totalBytes()) + 
-                  " used: " + String(LittleFS.usedBytes()));
+    debugLog("ERROR: Could not open pending file after retries");
+    Serial.println("LittleFS total: " + String(LittleFS.totalBytes()) +
+                   " used: " + String(LittleFS.usedBytes()));
     return;
   }
+
   f.print(getTimestamp(now));
   f.print(",");
   f.print(truckVolts, 3);
@@ -308,7 +338,6 @@ bool connectWiFi() {
   WiFi.mode(WIFI_STA);
   delay(500);
 
-  // Try each network in order
   for (int n = 0; n < WIFI_COUNT; n++) {
     debugLog("Trying network: " + String(WIFI_SSIDS[n]));
     WiFi.begin(WIFI_SSIDS[n], WIFI_PASSWORDS[n]);
@@ -409,7 +438,6 @@ bool sendToGoogleSheets(String compactData) {
   debugLog("Sending to Google Sheets...");
 
   compactData.replace(" ", "%20");
-
   debugLog("Payload length: " + String(compactData.length()) + " chars");
 
   WiFiClientSecure secureClient;
@@ -500,7 +528,6 @@ void uploadPending() {
       compact += ts + "," + String(truckV, 3) + "," + String(battV, 3) + "," + chargeCompact;
     }
 
-    int batchCount = batchEnd - sent;
     debugLog("Sending batch " + String(sent/BATCH_SIZE + 1) +
              ": records " + String(sent+1) + "-" + String(batchEnd) +
              " (" + String(compact.length()) + " chars)");
@@ -522,6 +549,153 @@ void uploadPending() {
   debugLog("Upload complete — " + String(totalCount) + " records, pending cleared");
 }
 
+// ===== OTA =====
+void checkAndApplyOTA() {
+  debugLog("Checking for OTA update...");
+
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure();
+
+  // Step 1 — fetch version.txt
+  HTTPClient http;
+  http.begin(secureClient, OTA_VERSION_URL);
+  http.setTimeout(10000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  feedWatchdog();
+  int httpCode = http.GET();
+  feedWatchdog();
+
+  if (httpCode != 200) {
+    debugLog("OTA version check failed — HTTP " + String(httpCode));
+    http.end();
+    return;
+  }
+
+  String remoteVersion = http.getString();
+  http.end();
+  remoteVersion.trim();
+
+  int localVer  = parseVersion(String(FIRMWARE_VERSION));
+  int remoteVer = parseVersion(remoteVersion);
+
+  debugLog("Local: " + String(FIRMWARE_VERSION) + " (" + String(localVer) + ")" +
+           " Remote: " + remoteVersion + " (" + String(remoteVer) + ")");
+
+  if (remoteVer <= localVer) {
+    debugLog("Firmware up to date");
+    return;
+  }
+
+  debugLog("New firmware available: " + remoteVersion + " — downloading...");
+
+  // Increase watchdog for download
+  esp_task_wdt_init(300, false);
+
+  // Step 2 — download and flash firmware.bin
+  http.begin(secureClient, OTA_FIRMWARE_URL);
+  http.setTimeout(60000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  feedWatchdog();
+  httpCode = http.GET();
+  feedWatchdog();
+
+  if (httpCode != 200) {
+    debugLog("OTA firmware download failed — HTTP " + String(httpCode));
+    http.end();
+    esp_task_wdt_init(120, false);
+    if (connectMQTT()) {
+      String status = "500_" + remoteVersion;
+      Adafruit_MQTT_Publish feedOTA(&mqtt, AIO_USERNAME "/feeds/charge-status");
+      feedOTA.publish(status.c_str());
+      mqtt.disconnect();
+    }
+    return;
+  }
+
+  int contentLength = http.getSize();
+  debugLog("Firmware size: " + String(contentLength) + " bytes");
+
+  if (contentLength <= 0) {
+    debugLog("OTA invalid content length");
+    http.end();
+    esp_task_wdt_init(120, false);
+    return;
+  }
+
+  if (!Update.begin(contentLength)) {
+    debugLog("OTA Update.begin failed — not enough space");
+    http.end();
+    esp_task_wdt_init(120, false);
+    return;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  size_t written = 0;
+  uint8_t buf[512];
+  unsigned long lastFeed = millis();
+  unsigned long lastProgress = millis();
+
+  while (http.connected() && written < (size_t)contentLength) {
+    size_t available = stream->available();
+    if (available) {
+      size_t toRead = min(available, sizeof(buf));
+      size_t bytesRead = stream->readBytes(buf, toRead);
+      written += Update.write(buf, bytesRead);
+    }
+
+    if (millis() - lastFeed > 5000) {
+      feedWatchdog();
+      lastFeed = millis();
+    }
+
+    if (millis() - lastProgress > 10000) {
+      debugLog("OTA progress: " + String(written) + "/" + String(contentLength) +
+               " (" + String(written * 100 / contentLength) + "%)");
+      lastProgress = millis();
+    }
+
+    delay(1);
+  }
+  http.end();
+
+  if (written != (size_t)contentLength) {
+    debugLog("OTA write incomplete: " + String(written) + "/" + String(contentLength));
+    Update.abort();
+    esp_task_wdt_init(120, false);
+    return;
+  }
+
+  if (!Update.end(true)) {
+    debugLog("OTA Update.end failed — error: " + String(Update.getError()));
+    esp_task_wdt_init(120, false);
+    if (connectMQTT()) {
+      String status = "500_" + remoteVersion;
+      Adafruit_MQTT_Publish feedOTA(&mqtt, AIO_USERNAME "/feeds/charge-status");
+      feedOTA.publish(status.c_str());
+      mqtt.disconnect();
+    }
+    return;
+  }
+
+  debugLog("OTA success — new version: " + remoteVersion);
+
+  // Publish success before reboot
+  if (connectMQTT()) {
+    String status = "200_" + remoteVersion;
+    Adafruit_MQTT_Publish feedOTA(&mqtt, AIO_USERNAME "/feeds/charge-status");
+    feedOTA.publish(status.c_str());
+    debugLog("OTA status published: " + status);
+    mqtt.disconnect();
+  }
+
+  debugLog("Rebooting into new firmware...");
+  Serial.flush();
+  delay(500);
+  ESP.restart();
+}
+
 // ===== UPLOAD CYCLE =====
 bool doUploadCycle(float truckVolts, float battVolts) {
   debugLog("Upload cycle triggered — " + String(recordCount) + " records");
@@ -531,6 +705,7 @@ bool doUploadCycle(float truckVolts, float battVolts) {
     }
     uploadPending();
     publishLatestReading(truckVolts, battVolts);
+    checkAndApplyOTA();
     disconnectWiFi();
     return true;
   }
@@ -589,31 +764,29 @@ void setup() {
     while (1) delay(100);
   }
 
-  if (!LittleFS.begin(true)) {  // true = format on fail
-    Serial.println("ERROR: LittleFS failed even with format on fail");
-    while (1) delay(100);
-}
-fsReady = true;
-
-// Verify filesystem is writable
-File testFile = LittleFS.open("/fstest", "w");
-if (!testFile) {
-  Serial.println("LittleFS not writable — forcing format...");
-  fsReady = false;
-  LittleFS.end();
-  LittleFS.format();
   if (!LittleFS.begin(true)) {
-    Serial.println("ERROR: LittleFS failed after forced format");
+    Serial.println("ERROR: LittleFS failed even with format on fail");
     while (1) delay(100);
   }
   fsReady = true;
-} else {
-  testFile.close();
-  LittleFS.remove("/fstest");
-  Serial.println("LittleFS writable — OK");
-}
 
-Serial.println("LittleFS total: " + String(LittleFS.totalBytes()) + " used: " + String(LittleFS.usedBytes()));
+  // Verify filesystem is writable
+  File testFile = LittleFS.open("/fstest", "w");
+  if (!testFile) {
+    Serial.println("LittleFS not writable — forcing format...");
+    fsReady = false;
+    LittleFS.end();
+    LittleFS.format();
+    if (!LittleFS.begin(true)) {
+      Serial.println("ERROR: LittleFS failed after forced format");
+      while (1) delay(100);
+    }
+    fsReady = true;
+  } else {
+    testFile.close();
+    LittleFS.remove("/fstest");
+    Serial.println("LittleFS writable — OK");
+  }
 
   loadState();
 

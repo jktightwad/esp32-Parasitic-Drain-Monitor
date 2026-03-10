@@ -8,7 +8,7 @@
 #define NTP_SERVER      "pool.ntp.org"
 
 // ===== FIRMWARE =====
-#define FIRMWARE_VERSION    "1.0"
+#define FIRMWARE_VERSION    "1.0.2"
 
 // ===== OTA ===== //additing so it triggers
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
