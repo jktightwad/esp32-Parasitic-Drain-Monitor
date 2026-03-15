@@ -8,7 +8,7 @@
 #define NTP_SERVER      "pool.ntp.org"
 
 // ===== FIRMWARE =====
-#define FIRMWARE_VERSION    "1.0.2"
+#define FIRMWARE_VERSION    "1.0.3"
 
 // ===== OTA ===== //additing so it triggers
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
@@ -16,11 +16,13 @@
 
 // ===== PINS =====
 #define PIN_TRUCK_SOURCE     0
-#define PIN_TRUCK_ADC        1
-#define PIN_BATT_ADC         4
+//#define PIN_TRUCK_ADC        1
+//#define PIN_BATT_ADC         4
+#define PIN_TRUCK_ADC        4
+#define PIN_BATT_ADC         1
 #define PIN_CHARGE_MOSFET    7
-#define PIN_DS3231_SDA       8
-#define PIN_DS3231_SCL       9
+#define PIN_DS3231_SDA       9
+#define PIN_DS3231_SCL       8
 
 // ===== VOLTAGE DIVIDER RATIOS =====
 #define TRUCK_DIVIDER_RATIO  (55.0 / 9.9)
@@ -39,13 +41,13 @@
 #define MAX_PENDING_RECORDS  100
 
 // ===== TIMING =====
-#define SLEEP_SECONDS        30    // testing — change to 300 for final
-#define UPLOAD_EVERY         6     // testing — change to 12 for final
-#define CHARGE_CHECK_SECONDS 60
+#define SLEEP_SECONDS        300    // testing — change to 300 for final
+#define UPLOAD_EVERY         12     // testing — change to 12 for final
+const int CHARGE_CHECK_SECONDS = (SLEEP_SECONDS < 60) ? SLEEP_SECONDS : 60;
 
 // ===== VOLTAGE THRESHOLDS =====
 #define VOLTAGE_RUNNING      12.9
-#define VOLTAGE_LOW          12.0
+#define VOLTAGE_LOW          11.5
 #define BATT_LOW             2.80
 #define BATT_START_CHARGE    3.50
 #define BATT_STOP_CHARGE     3.58

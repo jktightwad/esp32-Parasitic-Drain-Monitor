@@ -748,7 +748,10 @@ void setup() {
   digitalWrite(PIN_TRUCK_SOURCE, LOW);
   pinMode(PIN_CHARGE_MOSFET, OUTPUT);
   digitalWrite(PIN_CHARGE_MOSFET, LOW);
-
+  pinMode(PIN_TRUCK_ADC, INPUT);
+  pinMode(PIN_BATT_ADC, INPUT);
+  digitalWrite(PIN_TRUCK_ADC, LOW);
+  digitalWrite(PIN_BATT_ADC, LOW);
   analogSetAttenuation(ADC_11db);
   esp_adc_cal_characterize(
     ADC_UNIT_1,
@@ -760,8 +763,8 @@ void setup() {
 
   Wire.begin(PIN_DS3231_SDA, PIN_DS3231_SCL);
   if (!rtc.begin()) {
-    Serial.println("ERROR: DS3231 not found");
-    while (1) delay(100);
+      Serial.println("WARNING: DS3231 not found — using default timestamp");
+      // Continue without RTC, timestamps will be incorrect
   }
 
   if (!LittleFS.begin(true)) {
@@ -789,6 +792,14 @@ void setup() {
   }
 
   loadState();
+
+  // Force NTP sync if RTC time is invalid
+  DateTime rtcCheck = rtc.now();
+  if (rtcCheck.year() < 2020) {
+    debugLog("RTC time invalid — forcing NTP sync");
+    ntpSynced = false;
+    saveState();
+  }
 
   snprintf(TOPIC_TRUCK, sizeof(TOPIC_TRUCK), "%s/feeds/truck-voltage", AIO_USERNAME);
   snprintf(TOPIC_BATT,  sizeof(TOPIC_BATT),  "%s/feeds/device-voltage", AIO_USERNAME);
