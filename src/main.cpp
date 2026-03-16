@@ -412,8 +412,7 @@ bool connectWiFi() {
   for (int attempt = 1; attempt <= WIFI_MAX_ATTEMPTS; attempt++) {
     debugLog("Attempt " + String(attempt) + " of " + String(WIFI_MAX_ATTEMPTS));
 
-    WiFi.begin(WIFI_SSIDS[networkIndex], WIFI_PASSWORDS[networkIndex],
-           bestChannel, bestBSSID);
+    WiFi.begin(WIFI_SSIDS[networkIndex], WIFI_PASSWORDS[networkIndex]);
 
     int dots = 0;
     while (WiFi.status() != WL_CONNECTED && dots < 20) {
