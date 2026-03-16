@@ -789,15 +789,21 @@ void doDebugCycle(float truckVolts, float battVolts) {
   }
 
   if (connectMQTT()) {
-    String msg = "RSSI:" + String(WiFi.RSSI()) +
-                 " Ch:" + String(WiFi.channel()) +
-                 " Truck:" + String(truckVolts, 3) +
-                 " Batt:" + String(battVolts, 3) +
-                 " FailedScans:" + String(failedScanCount);
+    uint8_t* bssid = WiFi.BSSID();
+        char bssidStr[18];
+        snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
 
-    bool ok = feedDebug->publish(msg.c_str());
-    debugLog(ok ? "Debug published: " + msg : "Debug publish failed");
-    mqtt.disconnect();
+        String msg = "RSSI:" + String(WiFi.RSSI()) +
+                    " Ch:" + String(WiFi.channel()) +
+                    " AP:" + String(bssidStr) +
+                    " Truck:" + String(truckVolts, 3) +
+                    " Batt:" + String(battVolts, 3) +
+                    " FailedScans:" + String(failedScanCount);
+
+        bool ok = feedDebug->publish(msg.c_str());
+        debugLog(ok ? "Debug published: " + msg : "Debug publish failed");
+        mqtt.disconnect();
   }
 
   failedScanCount = 0;
