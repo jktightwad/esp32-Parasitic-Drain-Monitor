@@ -13,7 +13,7 @@
 #define WIFI_MAX_ATTEMPTS   3
 
 // ===== FIRMWARE =====
-#define FIRMWARE_VERSION    "1.0.31" //added debug
+#define FIRMWARE_VERSION    "1.0.32" //added debug
 
 // ===== OTA ===== //additing so it triggers
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
