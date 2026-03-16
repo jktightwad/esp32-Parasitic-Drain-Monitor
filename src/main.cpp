@@ -14,9 +14,10 @@
 #include "config.h"
 
 // State
-int  recordCount  = 0;
-bool ntpSynced    = false;
-int  wakeCount    = 0;
+int  recordCount     = 0;
+bool ntpSynced       = false;
+int  wakeCount       = 0;
+int  failedScanCount = 0;
 
 esp_adc_cal_characteristics_t adc_chars;
 RTC_DS3231 rtc;
@@ -25,8 +26,10 @@ WiFiClient mqttWifiClient;
 Adafruit_MQTT_Client mqtt(&mqttWifiClient, AIO_SERVER, AIO_PORT, AIO_USERNAME, AIO_KEY);
 char TOPIC_TRUCK[64];
 char TOPIC_BATT[64];
+char TOPIC_DEBUG[64];
 Adafruit_MQTT_Publish* feedTruckVoltage;
 Adafruit_MQTT_Publish* feedBattVoltage;
+Adafruit_MQTT_Publish* feedDebug;
 
 bool fsReady = false;
 
@@ -36,7 +39,6 @@ void feedWatchdog() {
 }
 
 // ===== VERSION PARSING =====
-// Converts "x.y.z" to comparable integer e.g. "1.2.3" -> 10203
 int parseVersion(String v) {
   v.trim();
   int major = 0, minor = 0, patch = 0;
@@ -131,12 +133,15 @@ void loadState() {
       wakeCount = line.substring(10).toInt();
     else if (line.startsWith("ntpSynced="))
       ntpSynced = line.substring(10).toInt() == 1;
+    else if (line.startsWith("failedScanCount="))
+      failedScanCount = line.substring(16).toInt();
   }
   f.close();
 
   debugLog("State loaded — wakes=" + String(wakeCount) +
            " records=" + String(recordCount) +
-           " ntp=" + String(ntpSynced));
+           " ntp=" + String(ntpSynced) +
+           " failedScans=" + String(failedScanCount));
 }
 
 void saveState() {
@@ -150,6 +155,7 @@ void saveState() {
   f.println("recordCount=" + String(recordCount));
   f.println("wakeCount="   + String(wakeCount));
   f.println("ntpSynced="   + String(ntpSynced ? 1 : 0));
+  f.println("failedScanCount=" + String(failedScanCount));
   f.close();
 }
 
@@ -279,7 +285,6 @@ void writePending(DateTime now, float truckVolts, float battVolts, bool charging
     }
   }
 
-  // Retry loop for file creation
   File f;
   int retries = 0;
   while (retries < 3) {
@@ -327,45 +332,121 @@ void archiveRecord(String line) {
   }
 }
 
-// ===== WIFI =====
+// ===== WIFI SCAN =====
+// Scans for known networks, returns index into WIFI_SSIDS of strongest found
+// Populates bestBSSID and bestChannel for use in connection
+// Returns -1 if no known network found
+int scanForKnownNetworks(uint8_t* bestBSSID, int* bestChannel) {
+  debugLog("Scanning for known networks...");
+
+  int found = WiFi.scanNetworks();
+
+  if (found <= 0) {
+    debugLog("No networks found");
+    WiFi.scanDelete();
+    return -1;
+  }
+
+  debugLog("Networks found: " + String(found));
+
+  int bestIndex = -1;
+  int bestRSSI  = -999;
+
+  for (int i = 0; i < found; i++) {
+    String scannedSSID = WiFi.SSID(i);
+    int    scannedRSSI = WiFi.RSSI(i);
+    int    scannedCh   = WiFi.channel(i);
+    debugLog("  " + scannedSSID + " (" + String(scannedRSSI) + " dBm) ch" + String(scannedCh));
+
+    for (int n = 0; n < WIFI_COUNT; n++) {
+      if (scannedSSID == String(WIFI_SSIDS[n])) {
+        if (scannedRSSI > bestRSSI) {
+          bestRSSI     = scannedRSSI;
+          bestIndex    = n;
+          *bestChannel = scannedCh;
+          memcpy(bestBSSID, WiFi.BSSID(i), 6);
+        }
+      }
+    }
+  }
+
+  WiFi.scanDelete();
+
+  if (bestIndex >= 0) {
+    debugLog("Best known network: " + String(WIFI_SSIDS[bestIndex]) +
+             " (" + String(bestRSSI) + " dBm) ch" + String(*bestChannel));
+  } else {
+    debugLog("No known networks in range");
+  }
+
+  return bestIndex;
+}
+
+// ===== WIFI CONNECT =====
 bool connectWiFi() {
   debugLog("Connecting to WiFi...");
 
-  WiFi.disconnect();
-  delay(500);
-  WiFi.mode(WIFI_OFF);
-  delay(1000);
+  // Scan first as a gate check — no point connecting if network not visible
   WiFi.mode(WIFI_STA);
   delay(500);
 
-  for (int n = 0; n < WIFI_COUNT; n++) {
-    debugLog("Trying network: " + String(WIFI_SSIDS[n]));
-    WiFi.begin(WIFI_SSIDS[n], WIFI_PASSWORDS[n]);
+  uint8_t bestBSSID[6];
+  int     bestChannel  = 0;
+  int     networkIndex = scanForKnownNetworks(bestBSSID, &bestChannel);
 
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  if (networkIndex < 0) {
+    failedScanCount++;
+    saveState();
+    debugLog("No known network in range — failedScans=" + String(failedScanCount));
+    return false;
+  }
+
+  // Full radio reset after scan before connecting — same sequence that worked before scan was added
+  WiFi.mode(WIFI_OFF);
+  delay(1000);
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_STA);
+  delay(1000);
+
+  for (int attempt = 1; attempt <= WIFI_MAX_ATTEMPTS; attempt++) {
+    debugLog("Attempt " + String(attempt) + " of " + String(WIFI_MAX_ATTEMPTS));
+
+    WiFi.begin(WIFI_SSIDS[networkIndex], WIFI_PASSWORDS[networkIndex],
+           bestChannel, bestBSSID);
+
+    int dots = 0;
+    while (WiFi.status() != WL_CONNECTED && dots < 20) {
       delay(500);
       feedWatchdog();
-      attempts++;
+      dots++;
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-      debugLog("WiFi connected: " + WiFi.localIP().toString());
+      debugLog("WiFi connected: " + WiFi.localIP().toString() +
+               " RSSI: " + String(WiFi.RSSI()) + " dBm" +
+               " ch" + String(bestChannel));
       return true;
     }
 
-    debugLog("Network " + String(WIFI_SSIDS[n]) + " failed");
-    WiFi.disconnect();
-    delay(500);
+    debugLog("Connect failed — status: " + String(WiFi.status()));
+    if (attempt < WIFI_MAX_ATTEMPTS) {
+      WiFi.disconnect(false);
+      delay(1000);
+      debugLog("Waiting before retry...");
+      delay(2000);
+    }
   }
 
-  debugLog("All networks failed");
+  failedScanCount++;
+  saveState();
+  debugLog("All attempts failed — failedScans=" + String(failedScanCount));
   return false;
 }
 
 void disconnectWiFi() {
   mqtt.disconnect();
-  WiFi.disconnect();
+  WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   delay(500);
 }
@@ -556,7 +637,6 @@ void checkAndApplyOTA() {
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
 
-  // Step 1 — fetch version.txt
   HTTPClient http;
   http.begin(secureClient, OTA_VERSION_URL);
   http.setTimeout(10000);
@@ -589,10 +669,8 @@ void checkAndApplyOTA() {
 
   debugLog("New firmware available: " + remoteVersion + " — downloading...");
 
-  // Increase watchdog for download
   esp_task_wdt_init(300, false);
 
-  // Step 2 — download and flash firmware.bin
   http.begin(secureClient, OTA_FIRMWARE_URL);
   http.setTimeout(60000);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
@@ -634,13 +712,13 @@ void checkAndApplyOTA() {
   WiFiClient* stream = http.getStreamPtr();
   size_t written = 0;
   uint8_t buf[512];
-  unsigned long lastFeed = millis();
+  unsigned long lastFeed     = millis();
   unsigned long lastProgress = millis();
 
   while (http.connected() && written < (size_t)contentLength) {
     size_t available = stream->available();
     if (available) {
-      size_t toRead = min(available, sizeof(buf));
+      size_t toRead    = min(available, sizeof(buf));
       size_t bytesRead = stream->readBytes(buf, toRead);
       written += Update.write(buf, bytesRead);
     }
@@ -681,7 +759,6 @@ void checkAndApplyOTA() {
 
   debugLog("OTA success — new version: " + remoteVersion);
 
-  // Publish success before reboot
   if (connectMQTT()) {
     String status = "200_" + remoteVersion;
     Adafruit_MQTT_Publish feedOTA(&mqtt, AIO_USERNAME "/feeds/charge-status");
@@ -696,19 +773,62 @@ void checkAndApplyOTA() {
   ESP.restart();
 }
 
+// ===== DEBUG CYCLE =====
+void doDebugCycle(float truckVolts, float battVolts) {
+  debugLog("=== DEBUG CYCLE ===");
+
+  if (!connectWiFi()) {
+    debugLog("No network found — failedScans=" + String(failedScanCount));
+    return;
+  }
+
+  if (!ntpSynced) {
+    if (syncNTP()) {
+      ntpSynced = true;
+      saveState();
+    }
+  }
+
+  if (connectMQTT()) {
+    String msg = "RSSI:" + String(WiFi.RSSI()) +
+                 " Ch:" + String(WiFi.channel()) +
+                 " Truck:" + String(truckVolts, 3) +
+                 " Batt:" + String(battVolts, 3) +
+                 " FailedScans:" + String(failedScanCount);
+
+    bool ok = feedDebug->publish(msg.c_str());
+    debugLog(ok ? "Debug published: " + msg : "Debug publish failed");
+    mqtt.disconnect();
+  }
+
+  failedScanCount = 0;
+  saveState();
+
+  checkAndApplyOTA();
+  disconnectWiFi();
+}
+
 // ===== UPLOAD CYCLE =====
 bool doUploadCycle(float truckVolts, float battVolts) {
   debugLog("Upload cycle triggered — " + String(recordCount) + " records");
+
   if (connectWiFi()) {
     if (!ntpSynced) {
-      if (syncNTP()) ntpSynced = true;
+      if (syncNTP()) {
+        ntpSynced = true;
+        saveState();
+      }
     }
     uploadPending();
     publishLatestReading(truckVolts, battVolts);
     checkAndApplyOTA();
     disconnectWiFi();
+
+    failedScanCount = 0;
+    saveState();
     return true;
   }
+
   debugLog("WiFi unavailable — retry next cycle");
   return false;
 }
@@ -731,6 +851,9 @@ void goToSleep() {
 void setup() {
   Serial.begin(115200);
 
+  // Watchdog FIRST — before any delays
+  esp_task_wdt_init(120, false);
+
   esp_reset_reason_t reason = esp_reset_reason();
   if (reason != ESP_RST_DEEPSLEEP) {
     Serial.println("Non-sleep reset — 10 second flash window");
@@ -739,8 +862,6 @@ void setup() {
     delay(5000);
   }
 
-  esp_task_wdt_init(120, false);
-
   Serial.print("Reset reason: ");
   Serial.println((int)reason);
 
@@ -748,10 +869,10 @@ void setup() {
   digitalWrite(PIN_TRUCK_SOURCE, LOW);
   pinMode(PIN_CHARGE_MOSFET, OUTPUT);
   digitalWrite(PIN_CHARGE_MOSFET, LOW);
+
   pinMode(PIN_TRUCK_ADC, INPUT);
   pinMode(PIN_BATT_ADC, INPUT);
-  digitalWrite(PIN_TRUCK_ADC, LOW);
-  digitalWrite(PIN_BATT_ADC, LOW);
+
   analogSetAttenuation(ADC_11db);
   esp_adc_cal_characterize(
     ADC_UNIT_1,
@@ -763,8 +884,7 @@ void setup() {
 
   Wire.begin(PIN_DS3231_SDA, PIN_DS3231_SCL);
   if (!rtc.begin()) {
-      Serial.println("WARNING: DS3231 not found — using default timestamp");
-      // Continue without RTC, timestamps will be incorrect
+    Serial.println("WARNING: DS3231 not found — using default timestamp");
   }
 
   if (!LittleFS.begin(true)) {
@@ -773,7 +893,6 @@ void setup() {
   }
   fsReady = true;
 
-  // Verify filesystem is writable
   File testFile = LittleFS.open("/fstest", "w");
   if (!testFile) {
     Serial.println("LittleFS not writable — forcing format...");
@@ -801,19 +920,19 @@ void setup() {
     saveState();
   }
 
-  snprintf(TOPIC_TRUCK, sizeof(TOPIC_TRUCK), "%s/feeds/truck-voltage", AIO_USERNAME);
+  snprintf(TOPIC_TRUCK, sizeof(TOPIC_TRUCK), "%s/feeds/truck-voltage",  AIO_USERNAME);
   snprintf(TOPIC_BATT,  sizeof(TOPIC_BATT),  "%s/feeds/device-voltage", AIO_USERNAME);
+  snprintf(TOPIC_DEBUG, sizeof(TOPIC_DEBUG), "%s/feeds/debug-messages", AIO_USERNAME);
   feedTruckVoltage = new Adafruit_MQTT_Publish(&mqtt, TOPIC_TRUCK);
   feedBattVoltage  = new Adafruit_MQTT_Publish(&mqtt, TOPIC_BATT);
+  feedDebug        = new Adafruit_MQTT_Publish(&mqtt, TOPIC_DEBUG);
 
   wakeCount++;
-  recordCount++;
   saveState();
 
   debugLog("=== Wake #" + String(wakeCount) +
-           " record " + String(recordCount) +
-           "/" + String(UPLOAD_EVERY) +
-           " reset=" + String((int)reason) + " ===");
+           " reset=" + String((int)reason) +
+           (DEBUG_MODE ? " DEBUG" : "") + " ===");
 
   if (wakeCount == 1) {
     dumpDebugLog();
@@ -828,19 +947,35 @@ void setup() {
   bool charging     = truckRunning && (battVolts < BATT_START_CHARGE);
 
   debugLog(getTimestamp(now) +
-           " | Raw: "       + String(rawTruck, 3) +
-           "V | Truck: "    + String(truckVolts, 3) +
-           "V | Batt: "     + String(battVolts, 3) +
-           "V | Running: "  + (truckRunning ? "YES" : "NO") +
-           " | Charging: "  + (charging ? "YES" : "NO"));
+           " | Raw: "      + String(rawTruck, 3) +
+           "V | Truck: "   + String(truckVolts, 3) +
+           "V | Batt: "    + String(battVolts, 3) +
+           "V | Running: " + (truckRunning ? "YES" : "NO") +
+           " | Charging: " + (charging ? "YES" : "NO"));
 
+  // ===== DEBUG MODE =====
+  if (DEBUG_MODE) {
+    doDebugCycle(truckVolts, battVolts);
+    debugLog("Debug loop — restarting in " + String(DEBUG_SLEEP_SECONDS) + "s");
+    Serial.flush();
+    delay(DEBUG_SLEEP_SECONDS * 1000);
+    esp_task_wdt_deinit();
+    ESP.restart();
+  }
+
+  // ===== NORMAL OPERATION =====
   digitalWrite(PIN_CHARGE_MOSFET, charging ? HIGH : LOW);
   writePending(now, truckVolts, battVolts, charging);
 
+  recordCount++;
+  saveState();
+
+  debugLog("record " + String(recordCount) + "/" + String(UPLOAD_EVERY));
+
   while (truckRunning) {
     debugLog("Truck running — Charging: " + String(charging ? "YES" : "NO") +
-             " | Truck: "  + String(truckVolts, 3) +
-             "V | Batt: "  + String(battVolts, 3) + "V");
+             " | Truck: " + String(truckVolts, 3) +
+             "V | Batt: " + String(battVolts, 3) + "V");
 
     for (int i = 0; i < CHARGE_CHECK_SECONDS; i++) {
       delay(1000);

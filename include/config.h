@@ -2,13 +2,18 @@
 
 #include "secrets.h"
 
+// ==== DEBUG MODE ====
+#define DEBUG_MODE  true  // set true to enable remote debugging
+#define DEBUG_SLEEP_SECONDS  15      // loop interval in debug mode
+
 // ===== NETWORK =====
 #define AIO_SERVER      "io.adafruit.com"
 #define AIO_PORT        1883
 #define NTP_SERVER      "pool.ntp.org"
+#define WIFI_MAX_ATTEMPTS   3
 
 // ===== FIRMWARE =====
-#define FIRMWARE_VERSION    "1.0.3"
+#define FIRMWARE_VERSION    "1.0.31" //added debug
 
 // ===== OTA ===== //additing so it triggers
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
