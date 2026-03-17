@@ -10,10 +10,10 @@
 #define AIO_SERVER      "io.adafruit.com"
 #define AIO_PORT        1883
 #define NTP_SERVER      "pool.ntp.org"
-#define WIFI_MAX_ATTEMPTS   3
+#define WIFI_ATTEMPTS_PER_NETWORK  3   // attempts per network before moving to next
 
 // ===== FIRMWARE =====
-#define FIRMWARE_VERSION    "1.0.33" //added debug
+#define FIRMWARE_VERSION    "1.0.34" //added debug
 
 // ===== OTA ===== //additing so it triggers
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
@@ -47,7 +47,7 @@
 
 // ===== TIMING =====
 #define SLEEP_SECONDS        300    // testing — change to 300 for final
-#define UPLOAD_EVERY         12     // testing — change to 12 for final
+#define UPLOAD_EVERY         6     // testing — change to 12 for final
 const int CHARGE_CHECK_SECONDS = (SLEEP_SECONDS < 60) ? SLEEP_SECONDS : 60;
 
 // ===== VOLTAGE THRESHOLDS =====

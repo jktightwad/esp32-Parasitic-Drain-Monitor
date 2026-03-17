@@ -12,8 +12,13 @@
 #include <time.h>
 #include "esp_task_wdt.h"
 #include "config.h"
+#include "storage.h"
+#include "portal.h"
 
-// State
+// ===== GLOBAL STATE =====
+DeviceConfig    deviceConfig;
+WiFiCredentials wifiCreds;
+
 int  recordCount     = 0;
 bool ntpSynced       = false;
 int  wakeCount       = 0;
@@ -22,16 +27,17 @@ int  failedScanCount = 0;
 esp_adc_cal_characteristics_t adc_chars;
 RTC_DS3231 rtc;
 
-WiFiClient mqttWifiClient;
-Adafruit_MQTT_Client mqtt(&mqttWifiClient, AIO_SERVER, AIO_PORT, AIO_USERNAME, AIO_KEY);
-char TOPIC_TRUCK[64];
-char TOPIC_BATT[64];
-char TOPIC_DEBUG[64];
-Adafruit_MQTT_Publish* feedTruckVoltage;
-Adafruit_MQTT_Publish* feedBattVoltage;
-Adafruit_MQTT_Publish* feedDebug;
+WiFiClient           mqttWifiClient;
+Adafruit_MQTT_Client mqtt(&mqttWifiClient, AIO_SERVER, AIO_PORT, "", "");
+char TOPIC_TRUCK[80];
+char TOPIC_BATT[80];
+char TOPIC_DEBUG[80];
+Adafruit_MQTT_Publish* feedTruckVoltage = nullptr;
+Adafruit_MQTT_Publish* feedBattVoltage  = nullptr;
+Adafruit_MQTT_Publish* feedDebug        = nullptr;
 
-bool fsReady = false;
+bool fsReady   = false;
+bool mqttReady = false;
 
 // ===== WATCHDOG =====
 void feedWatchdog() {
@@ -42,7 +48,7 @@ void feedWatchdog() {
 int parseVersion(String v) {
   v.trim();
   int major = 0, minor = 0, patch = 0;
-  int first = v.indexOf('.');
+  int first  = v.indexOf('.');
   int second = v.indexOf('.', first + 1);
   if (first < 0) {
     major = v.toInt();
@@ -114,6 +120,33 @@ void dumpPendingFile() {
   Serial.println("\n=== END PENDING FILE ===");
 }
 
+// ===== MQTT SETUP =====
+void setupMQTT() {
+  if (strlen(deviceConfig.aioUsername) == 0) {
+    mqttReady = false;
+    return;
+  }
+
+  mqtt.~Adafruit_MQTT_Client();
+  new (&mqtt) Adafruit_MQTT_Client(&mqttWifiClient, AIO_SERVER, AIO_PORT,
+                                    deviceConfig.aioUsername, deviceConfig.aioKey);
+
+  snprintf(TOPIC_TRUCK, sizeof(TOPIC_TRUCK), "%s/feeds/truck-voltage",  deviceConfig.aioUsername);
+  snprintf(TOPIC_BATT,  sizeof(TOPIC_BATT),  "%s/feeds/device-voltage", deviceConfig.aioUsername);
+  snprintf(TOPIC_DEBUG, sizeof(TOPIC_DEBUG), "%s/feeds/debug-messages", deviceConfig.aioUsername);
+
+  delete feedTruckVoltage;
+  delete feedBattVoltage;
+  delete feedDebug;
+
+  feedTruckVoltage = new Adafruit_MQTT_Publish(&mqtt, TOPIC_TRUCK);
+  feedBattVoltage  = new Adafruit_MQTT_Publish(&mqtt, TOPIC_BATT);
+  feedDebug        = new Adafruit_MQTT_Publish(&mqtt, TOPIC_DEBUG);
+
+  mqttReady = true;
+  debugLog("MQTT configured for: " + String(deviceConfig.aioUsername));
+}
+
 // ===== STATE PERSISTENCE =====
 void loadState() {
   if (!fsReady || !LittleFS.exists(STATE_FILE)) {
@@ -140,7 +173,6 @@ void loadState() {
 
   debugLog("State loaded — wakes=" + String(wakeCount) +
            " records=" + String(recordCount) +
-           " ntp=" + String(ntpSynced) +
            " failedScans=" + String(failedScanCount));
 }
 
@@ -170,7 +202,8 @@ float applyTruckCalibration(float rawVolts) {
   if (rawVolts >= TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE - 1][0]) {
     float slope = (TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE-1][1] - TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE-2][1]) /
                   (TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE-1][0] - TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE-2][0]);
-    return TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE-1][1] + slope * (rawVolts - TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE-1][0]);
+    return TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE-1][1] +
+           slope * (rawVolts - TRUCK_CAL_TABLE[TRUCK_CAL_TABLE_SIZE-1][0]);
   }
 
   for (int i = 0; i < TRUCK_CAL_TABLE_SIZE - 1; i++) {
@@ -193,7 +226,8 @@ float applyBattCalibration(float rawVolts) {
     return BATT_CAL_TABLE[0][1] + slope * (rawVolts - BATT_CAL_TABLE[0][0]);
 
   if (rawVolts >= BATT_CAL_TABLE[BATT_CAL_TABLE_SIZE-1][0])
-    return BATT_CAL_TABLE[BATT_CAL_TABLE_SIZE-1][1] + slope * (rawVolts - BATT_CAL_TABLE[BATT_CAL_TABLE_SIZE-1][0]);
+    return BATT_CAL_TABLE[BATT_CAL_TABLE_SIZE-1][1] +
+           slope * (rawVolts - BATT_CAL_TABLE[BATT_CAL_TABLE_SIZE-1][0]);
 
   return BATT_CAL_TABLE[0][1] + slope * (rawVolts - BATT_CAL_TABLE[0][0]);
 }
@@ -208,7 +242,7 @@ float readVoltage(int sourcePin, int adcPin, float dividerRatio) {
     sum += analogRead(adcPin);
     delayMicroseconds(50);
   }
-  uint32_t raw = sum / ADC_SAMPLES;
+  uint32_t raw        = sum / ADC_SAMPLES;
   uint32_t millivolts = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
 
   digitalWrite(sourcePin, LOW);
@@ -221,9 +255,9 @@ float readBattVoltage() {
     sum += analogRead(PIN_BATT_ADC);
     delayMicroseconds(50);
   }
-  uint32_t raw = sum / ADC_SAMPLES;
+  uint32_t raw        = sum / ADC_SAMPLES;
   uint32_t millivolts = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
-  float rawVolts = (millivolts / 1000.0) * BATT_DIVIDER_RATIO;
+  float rawVolts      = (millivolts / 1000.0) * BATT_DIVIDER_RATIO;
   return applyBattCalibration(rawVolts);
 }
 
@@ -296,8 +330,6 @@ void writePending(DateTime now, float truckVolts, float battVolts, bool charging
   }
   if (!f) {
     debugLog("ERROR: Could not open pending file after retries");
-    Serial.println("LittleFS total: " + String(LittleFS.totalBytes()) +
-                   " used: " + String(LittleFS.usedBytes()));
     return;
   }
 
@@ -333,10 +365,9 @@ void archiveRecord(String line) {
 }
 
 // ===== WIFI SCAN =====
-// Scans for known networks, returns index into WIFI_SSIDS of strongest found
-// Populates bestBSSID and bestChannel for use in connection
-// Returns -1 if no known network found
-int scanForKnownNetworks(uint8_t* bestBSSID, int* bestChannel) {
+// Returns count of visible known networks, sorted by RSSI strongest first
+int scanForKnownNetworks(int* visibleIndices, int* visibleRSSI,
+                          uint8_t visibleBSSID[][6], int* visibleChannels) {
   debugLog("Scanning for known networks...");
 
   int found = WiFi.scanNetworks();
@@ -344,13 +375,20 @@ int scanForKnownNetworks(uint8_t* bestBSSID, int* bestChannel) {
   if (found <= 0) {
     debugLog("No networks found");
     WiFi.scanDelete();
-    return -1;
+    return 0;
   }
 
   debugLog("Networks found: " + String(found));
 
-  int bestIndex = -1;
-  int bestRSSI  = -999;
+  int     bestRSSI[MAX_WIFI_NETWORKS];
+  bool    seen[MAX_WIFI_NETWORKS];
+  uint8_t bestBSSID[MAX_WIFI_NETWORKS][6];
+  int     bestChannel[MAX_WIFI_NETWORKS];
+
+  for (int i = 0; i < wifiCreds.count; i++) {
+    bestRSSI[i] = -999;
+    seen[i]     = false;
+  }
 
   for (int i = 0; i < found; i++) {
     String scannedSSID = WiFi.SSID(i);
@@ -358,13 +396,13 @@ int scanForKnownNetworks(uint8_t* bestBSSID, int* bestChannel) {
     int    scannedCh   = WiFi.channel(i);
     debugLog("  " + scannedSSID + " (" + String(scannedRSSI) + " dBm) ch" + String(scannedCh));
 
-    for (int n = 0; n < WIFI_COUNT; n++) {
-      if (scannedSSID == String(WIFI_SSIDS[n])) {
-        if (scannedRSSI > bestRSSI) {
-          bestRSSI     = scannedRSSI;
-          bestIndex    = n;
-          *bestChannel = scannedCh;
-          memcpy(bestBSSID, WiFi.BSSID(i), 6);
+    for (int n = 0; n < wifiCreds.count; n++) {
+      if (scannedSSID == String(wifiCreds.networks[n].ssid)) {
+        if (scannedRSSI > bestRSSI[n]) {
+          bestRSSI[n]    = scannedRSSI;
+          bestChannel[n] = scannedCh;
+          memcpy(bestBSSID[n], WiFi.BSSID(i), 6);
+          seen[n] = true;
         }
       }
     }
@@ -372,36 +410,69 @@ int scanForKnownNetworks(uint8_t* bestBSSID, int* bestChannel) {
 
   WiFi.scanDelete();
 
-  if (bestIndex >= 0) {
-    debugLog("Best known network: " + String(WIFI_SSIDS[bestIndex]) +
-             " (" + String(bestRSSI) + " dBm) ch" + String(*bestChannel));
+  // Build sorted list by RSSI (strongest first)
+  int visibleCount = 0;
+  for (int n = 0; n < wifiCreds.count; n++) {
+    if (!seen[n]) continue;
+
+    int pos = visibleCount;
+    while (pos > 0 && visibleRSSI[pos - 1] < bestRSSI[n]) pos--;
+
+    for (int j = visibleCount; j > pos; j--) {
+      visibleIndices[j]  = visibleIndices[j - 1];
+      visibleRSSI[j]     = visibleRSSI[j - 1];
+      visibleChannels[j] = visibleChannels[j - 1];
+      memcpy(visibleBSSID[j], visibleBSSID[j - 1], 6);
+    }
+
+    visibleIndices[pos]  = n;
+    visibleRSSI[pos]     = bestRSSI[n];
+    visibleChannels[pos] = bestChannel[n];
+    memcpy(visibleBSSID[pos], bestBSSID[n], 6);
+    visibleCount++;
+  }
+
+  if (visibleCount > 0) {
+    debugLog("Visible known: " + String(visibleCount) +
+             " — best: " + String(wifiCreds.networks[visibleIndices[0]].ssid) +
+             " (" + String(visibleRSSI[0]) + " dBm)");
   } else {
     debugLog("No known networks in range");
   }
 
-  return bestIndex;
+  return visibleCount;
 }
 
 // ===== WIFI CONNECT =====
 bool connectWiFi() {
-  debugLog("Connecting to WiFi...");
-
-  // Scan first as a gate check — no point connecting if network not visible
-  WiFi.mode(WIFI_STA);
-  delay(500);
-
-  uint8_t bestBSSID[6];
-  int     bestChannel  = 0;
-  int     networkIndex = scanForKnownNetworks(bestBSSID, &bestChannel);
-
-  if (networkIndex < 0) {
-    failedScanCount++;
-    saveState();
-    debugLog("No known network in range — failedScans=" + String(failedScanCount));
+  if (wifiCreds.count == 0) {
+    debugLog("No WiFi credentials configured");
     return false;
   }
 
-  // Full radio reset after scan before connecting — same sequence that worked before scan was added
+  debugLog("Connecting to WiFi...");
+
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_STA);
+  delay(500);
+
+  int     visibleIndices[MAX_WIFI_NETWORKS];
+  int     visibleRSSI[MAX_WIFI_NETWORKS];
+  uint8_t visibleBSSID[MAX_WIFI_NETWORKS][6];
+  int     visibleChannels[MAX_WIFI_NETWORKS];
+
+  int visibleCount = scanForKnownNetworks(visibleIndices, visibleRSSI,
+                                           visibleBSSID, visibleChannels);
+
+  if (visibleCount == 0) {
+    failedScanCount++;
+    saveState();
+    debugLog("No known networks in range — failedScans=" + String(failedScanCount));
+    return false;
+  }
+
+  // Full radio reset after scan
   WiFi.mode(WIFI_OFF);
   delay(1000);
   WiFi.persistent(false);
@@ -409,42 +480,53 @@ bool connectWiFi() {
   WiFi.mode(WIFI_STA);
   delay(1000);
 
-  for (int attempt = 1; attempt <= WIFI_MAX_ATTEMPTS; attempt++) {
-    debugLog("Attempt " + String(attempt) + " of " + String(WIFI_MAX_ATTEMPTS));
+  // Try each visible network up to WIFI_ATTEMPTS_PER_NETWORK times
+  for (int i = 0; i < visibleCount; i++) {
+    int         netIdx = visibleIndices[i];
+    const char* ssid   = wifiCreds.networks[netIdx].ssid;
+    const char* pass   = wifiCreds.networks[netIdx].pass;
 
-    WiFi.begin(WIFI_SSIDS[networkIndex], WIFI_PASSWORDS[networkIndex]);
+    for (int attempt = 1; attempt <= WIFI_ATTEMPTS_PER_NETWORK; attempt++) {
+      debugLog("Trying [" + String(ssid) + "] attempt " +
+               String(attempt) + "/" + String(WIFI_ATTEMPTS_PER_NETWORK));
 
-    int dots = 0;
-    while (WiFi.status() != WL_CONNECTED && dots < 20) {
-      delay(500);
-      feedWatchdog();
-      dots++;
-    }
+      WiFi.begin(ssid, pass);
 
-    if (WiFi.status() == WL_CONNECTED) {
-      debugLog("WiFi connected: " + WiFi.localIP().toString() +
-               " RSSI: " + String(WiFi.RSSI()) + " dBm" +
-               " ch" + String(bestChannel));
-      return true;
-    }
+      int dots = 0;
+      while (WiFi.status() != WL_CONNECTED && dots < 20) {
+        delay(500);
+        feedWatchdog();
+        dots++;
+      }
 
-    debugLog("Connect failed — status: " + String(WiFi.status()));
-    if (attempt < WIFI_MAX_ATTEMPTS) {
+      if (WiFi.status() == WL_CONNECTED) {
+        uint8_t* bssid = WiFi.BSSID();
+        char bssidStr[18];
+        snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+        debugLog("Connected: " + WiFi.localIP().toString() +
+                 " RSSI:" + String(WiFi.RSSI()) +
+                 " ch" + String(WiFi.channel()) +
+                 " AP:" + String(bssidStr));
+        failedScanCount = 0;
+        saveState();
+        return true;
+      }
+
+      debugLog("Failed — status: " + String(WiFi.status()));
       WiFi.disconnect(false);
-      delay(1000);
-      debugLog("Waiting before retry...");
-      delay(2000);
+      if (attempt < WIFI_ATTEMPTS_PER_NETWORK) delay(1000);
     }
   }
 
   failedScanCount++;
   saveState();
-  debugLog("All attempts failed — failedScans=" + String(failedScanCount));
+  debugLog("All networks failed — failedScans=" + String(failedScanCount));
   return false;
 }
 
 void disconnectWiFi() {
-  mqtt.disconnect();
+  if (mqttReady) mqtt.disconnect();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   delay(500);
@@ -477,14 +559,18 @@ bool syncNTP() {
     timeinfo.tm_sec
   ));
 
-  debugLog("RTC synced to NTP: " + getTimestamp(rtc.now()));
+  debugLog("RTC synced: " + getTimestamp(rtc.now()));
   return true;
 }
 
 // ===== MQTT =====
 bool connectMQTT() {
-  debugLog("Connecting to Adafruit IO...");
+  if (!mqttReady) {
+    debugLog("MQTT not configured — skipping");
+    return false;
+  }
 
+  debugLog("Connecting to Adafruit IO...");
   int attempts = 0;
   while (mqtt.connect() != 0 && attempts < 3) {
     mqtt.disconnect();
@@ -506,10 +592,8 @@ void publishLatestReading(float truckVolts, float battVolts) {
   if (!connectMQTT()) return;
   bool ok1 = feedTruckVoltage->publish(truckVolts);
   bool ok2 = feedBattVoltage->publish(battVolts);
-  debugLog(ok1 ? "MQTT truck published: " + String(truckVolts, 3) + "V"
-               : "MQTT truck publish failed");
-  debugLog(ok2 ? "MQTT batt published: " + String(battVolts, 3) + "V"
-               : "MQTT batt publish failed");
+  debugLog(ok1 ? "MQTT truck: " + String(truckVolts, 3) + "V" : "MQTT truck failed");
+  debugLog(ok2 ? "MQTT batt: "  + String(battVolts, 3)  + "V" : "MQTT batt failed");
   mqtt.disconnect();
 }
 
@@ -517,14 +601,13 @@ void publishLatestReading(float truckVolts, float battVolts) {
 bool sendToGoogleSheets(String compactData) {
   debugLog("Sending to Google Sheets...");
 
-  compactData.replace(" ", "%20");
-  debugLog("Payload length: " + String(compactData.length()) + " chars");
+  String payload = "device=" + String(deviceConfig.deviceName) + "&d=" + compactData;
+  payload.replace(" ", "%20");
 
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
 
-  String url = String(GS_SCRIPT_URL) + "?d=" + compactData;
-  debugLog("URL length: " + String(url.length()));
+  String url = String(GS_SCRIPT_URL) + "?" + payload;
 
   HTTPClient http;
   http.begin(secureClient, url);
@@ -538,9 +621,7 @@ bool sendToGoogleSheets(String compactData) {
   String response = http.getString();
   http.end();
 
-  debugLog("HTTP code: " + String(httpCode));
-  debugLog("Response: " + response.substring(0, 100));
-
+  debugLog("HTTP " + String(httpCode) + " — " + response.substring(0, 80));
   return response.indexOf("\"ok\"") >= 0;
 }
 
@@ -552,10 +633,7 @@ void uploadPending() {
   }
 
   File f = LittleFS.open(PENDING_FILE, "r");
-  if (!f) {
-    debugLog("ERROR: Could not open pending file");
-    return;
-  }
+  if (!f) { debugLog("ERROR: Cannot open pending"); return; }
 
   String lines[MAX_PENDING_RECORDS];
   int totalCount = 0;
@@ -565,73 +643,57 @@ void uploadPending() {
     String line = f.readStringUntil('\n');
     line.trim();
     if (line.length() == 0) continue;
-
     int comma1 = line.indexOf(',');
     int comma2 = line.indexOf(',', comma1 + 1);
     int comma3 = line.lastIndexOf(',');
     if (comma1 < 0 || comma2 < 0 || comma3 < 0 || comma1 == comma3) continue;
-
     lines[totalCount++] = line;
   }
   f.close();
 
-  if (totalCount == 0) {
-    debugLog("No valid records to upload");
-    return;
-  }
-
-  debugLog("Total records to upload: " + String(totalCount));
+  if (totalCount == 0) { debugLog("No valid records"); return; }
+  debugLog("Uploading " + String(totalCount) + " records");
 
   const int BATCH_SIZE = 40;
   int sent = 0;
 
   while (sent < totalCount) {
     feedWatchdog();
-
     int batchEnd = min(sent + BATCH_SIZE, totalCount);
     String compact = "";
 
     for (int i = sent; i < batchEnd; i++) {
-      String line = lines[i];
-      int comma1 = line.indexOf(',');
-      int comma2 = line.indexOf(',', comma1 + 1);
-      int comma3 = line.lastIndexOf(',');
-
+      String line    = lines[i];
+      int comma1     = line.indexOf(',');
+      int comma2     = line.indexOf(',', comma1 + 1);
+      int comma3     = line.lastIndexOf(',');
       String ts      = line.substring(0, comma1);
       float truckV   = line.substring(comma1 + 1, comma2).toFloat();
       float battV    = line.substring(comma2 + 1, comma3).toFloat();
       String chargeS = line.substring(comma3 + 1);
       chargeS.trim();
-      String chargeCompact = (chargeS == "true") ? "1" : "0";
-
       if (i > sent) compact += "|";
-      compact += ts + "," + String(truckV, 3) + "," + String(battV, 3) + "," + chargeCompact;
+      compact += ts + "," + String(truckV, 3) + "," + String(battV, 3) +
+                 "," + ((chargeS == "true") ? "1" : "0");
     }
 
-    debugLog("Sending batch " + String(sent/BATCH_SIZE + 1) +
-             ": records " + String(sent+1) + "-" + String(batchEnd) +
-             " (" + String(compact.length()) + " chars)");
-
     if (!sendToGoogleSheets(compact)) {
-      debugLog("Batch failed — aborting upload, keeping pending for retry");
+      debugLog("Batch failed — keeping for retry");
       return;
     }
 
-    for (int i = sent; i < batchEnd; i++) {
-      archiveRecord(lines[i]);
-    }
-
+    for (int i = sent; i < batchEnd; i++) archiveRecord(lines[i]);
     sent = batchEnd;
     feedWatchdog();
   }
 
   LittleFS.remove(PENDING_FILE);
-  debugLog("Upload complete — " + String(totalCount) + " records, pending cleared");
+  debugLog("Upload complete");
 }
 
 // ===== OTA =====
 void checkAndApplyOTA() {
-  debugLog("Checking for OTA update...");
+  debugLog("Checking OTA...");
 
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
@@ -658,16 +720,11 @@ void checkAndApplyOTA() {
   int localVer  = parseVersion(String(FIRMWARE_VERSION));
   int remoteVer = parseVersion(remoteVersion);
 
-  debugLog("Local: " + String(FIRMWARE_VERSION) + " (" + String(localVer) + ")" +
-           " Remote: " + remoteVersion + " (" + String(remoteVer) + ")");
+  debugLog("Local: " + String(FIRMWARE_VERSION) + " Remote: " + remoteVersion);
 
-  if (remoteVer <= localVer) {
-    debugLog("Firmware up to date");
-    return;
-  }
+  if (remoteVer <= localVer) { debugLog("Firmware up to date"); return; }
 
-  debugLog("New firmware available: " + remoteVersion + " — downloading...");
-
+  debugLog("Updating to " + remoteVersion + "...");
   esp_task_wdt_init(300, false);
 
   http.begin(secureClient, OTA_FIRMWARE_URL);
@@ -679,37 +736,22 @@ void checkAndApplyOTA() {
   feedWatchdog();
 
   if (httpCode != 200) {
-    debugLog("OTA firmware download failed — HTTP " + String(httpCode));
+    debugLog("OTA download failed — HTTP " + String(httpCode));
     http.end();
     esp_task_wdt_init(120, false);
-    if (connectMQTT()) {
-      String status = "500_" + remoteVersion;
-      Adafruit_MQTT_Publish feedOTA(&mqtt, AIO_USERNAME "/feeds/charge-status");
-      feedOTA.publish(status.c_str());
-      mqtt.disconnect();
-    }
     return;
   }
 
   int contentLength = http.getSize();
-  debugLog("Firmware size: " + String(contentLength) + " bytes");
-
-  if (contentLength <= 0) {
-    debugLog("OTA invalid content length");
+  if (contentLength <= 0 || !Update.begin(contentLength)) {
+    debugLog("OTA begin failed");
     http.end();
     esp_task_wdt_init(120, false);
     return;
   }
 
-  if (!Update.begin(contentLength)) {
-    debugLog("OTA Update.begin failed — not enough space");
-    http.end();
-    esp_task_wdt_init(120, false);
-    return;
-  }
-
-  WiFiClient* stream = http.getStreamPtr();
-  size_t written = 0;
+  WiFiClient* stream  = http.getStreamPtr();
+  size_t written      = 0;
   uint8_t buf[512];
   unsigned long lastFeed     = millis();
   unsigned long lastProgress = millis();
@@ -721,52 +763,23 @@ void checkAndApplyOTA() {
       size_t bytesRead = stream->readBytes(buf, toRead);
       written += Update.write(buf, bytesRead);
     }
-
-    if (millis() - lastFeed > 5000) {
-      feedWatchdog();
-      lastFeed = millis();
-    }
-
+    if (millis() - lastFeed > 5000)      { feedWatchdog(); lastFeed = millis(); }
     if (millis() - lastProgress > 10000) {
-      debugLog("OTA progress: " + String(written) + "/" + String(contentLength) +
-               " (" + String(written * 100 / contentLength) + "%)");
+      debugLog("OTA: " + String(written * 100 / contentLength) + "%");
       lastProgress = millis();
     }
-
     delay(1);
   }
   http.end();
 
-  if (written != (size_t)contentLength) {
-    debugLog("OTA write incomplete: " + String(written) + "/" + String(contentLength));
+  if (written != (size_t)contentLength || !Update.end(true)) {
+    debugLog("OTA failed");
     Update.abort();
     esp_task_wdt_init(120, false);
     return;
   }
 
-  if (!Update.end(true)) {
-    debugLog("OTA Update.end failed — error: " + String(Update.getError()));
-    esp_task_wdt_init(120, false);
-    if (connectMQTT()) {
-      String status = "500_" + remoteVersion;
-      Adafruit_MQTT_Publish feedOTA(&mqtt, AIO_USERNAME "/feeds/charge-status");
-      feedOTA.publish(status.c_str());
-      mqtt.disconnect();
-    }
-    return;
-  }
-
-  debugLog("OTA success — new version: " + remoteVersion);
-
-  if (connectMQTT()) {
-    String status = "200_" + remoteVersion;
-    Adafruit_MQTT_Publish feedOTA(&mqtt, AIO_USERNAME "/feeds/charge-status");
-    feedOTA.publish(status.c_str());
-    debugLog("OTA status published: " + status);
-    mqtt.disconnect();
-  }
-
-  debugLog("Rebooting into new firmware...");
+  debugLog("OTA success — rebooting into " + remoteVersion);
   Serial.flush();
   delay(500);
   ESP.restart();
@@ -777,72 +790,94 @@ void doDebugCycle(float truckVolts, float battVolts) {
   debugLog("=== DEBUG CYCLE ===");
 
   if (!connectWiFi()) {
-    debugLog("No network found — failedScans=" + String(failedScanCount));
+    debugLog("No network — failedScans=" + String(failedScanCount));
     return;
   }
 
   if (!ntpSynced) {
-    if (syncNTP()) {
-      ntpSynced = true;
-      saveState();
-    }
+    if (syncNTP()) { ntpSynced = true; saveState(); }
   }
 
-  if (connectMQTT()) {
+  if (mqttReady && connectMQTT()) {
     uint8_t* bssid = WiFi.BSSID();
-        char bssidStr[18];
-        snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-                bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+    char bssidStr[18];
+    snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
 
-        String msg = "RSSI:" + String(WiFi.RSSI()) +
-                    " Ch:" + String(WiFi.channel()) +
-                    " AP:" + String(bssidStr) +
-                    " Truck:" + String(truckVolts, 3) +
-                    " Batt:" + String(battVolts, 3) +
-                    " FailedScans:" + String(failedScanCount);
+    String msg = "RSSI:" + String(WiFi.RSSI()) +
+                 " Ch:" + String(WiFi.channel()) +
+                 " AP:" + String(bssidStr) +
+                 " Truck:" + String(truckVolts, 3) +
+                 " Batt:" + String(battVolts, 3) +
+                 " FailedScans:" + String(failedScanCount);
 
-        bool ok = feedDebug->publish(msg.c_str());
-        debugLog(ok ? "Debug published: " + msg : "Debug publish failed");
-        mqtt.disconnect();
+    bool ok = feedDebug->publish(msg.c_str());
+    debugLog(ok ? "Debug published: " + msg : "Debug publish failed");
+    mqtt.disconnect();
   }
 
   failedScanCount = 0;
   saveState();
-
   checkAndApplyOTA();
   disconnectWiFi();
 }
 
 // ===== UPLOAD CYCLE =====
 bool doUploadCycle(float truckVolts, float battVolts) {
-  debugLog("Upload cycle triggered — " + String(recordCount) + " records");
+  debugLog("Upload cycle — " + String(recordCount) + " records");
+
+  if (!connectWiFi()) {
+    debugLog("WiFi unavailable — retry next cycle");
+    return false;
+  }
+
+  if (!ntpSynced) {
+    if (syncNTP()) { ntpSynced = true; saveState(); }
+  }
+
+  uploadPending();
+  publishLatestReading(truckVolts, battVolts);
+  checkAndApplyOTA();
+  disconnectWiFi();
+
+  failedScanCount = 0;
+  saveState();
+  return true;
+}
+
+// ===== HANDLE PORTAL UPDATES =====
+// Called in main loop to check if portal received new credentials
+bool handlePortalUpdates(float truckVolts, float battVolts) {
+  if (!credsUpdated && !configUpdated) return false;
+
+  credsUpdated  = false;
+  configUpdated = false;
+  loadConfig(deviceConfig);
+  loadWiFiCredentials(wifiCreds);
+  setupMQTT();
+  debugLog("Credentials updated via portal — retrying WiFi");
 
   if (connectWiFi()) {
-    if (!ntpSynced) {
-      if (syncNTP()) {
-        ntpSynced = true;
-        saveState();
-      }
-    }
+    stopPortal();
+    if (!ntpSynced && syncNTP()) { ntpSynced = true; saveState(); }
     uploadPending();
     publishLatestReading(truckVolts, battVolts);
     checkAndApplyOTA();
     disconnectWiFi();
-
     failedScanCount = 0;
     saveState();
     return true;
   }
 
-  debugLog("WiFi unavailable — retry next cycle");
+  debugLog("New credentials failed — portal remains open");
   return false;
 }
 
 // ===== GOTO SLEEP =====
 void goToSleep() {
+  if (portalActive) stopPortal();
   digitalWrite(PIN_CHARGE_MOSFET, LOW);
-  debugLog("Sleeping " + String(SLEEP_SECONDS) + "s | wakes=" +
-           String(wakeCount) + " records=" + String(recordCount));
+  debugLog("Sleeping " + String(SLEEP_SECONDS) + "s");
   Serial.flush();
   delay(100);
 
@@ -856,12 +891,11 @@ void goToSleep() {
 void setup() {
   Serial.begin(115200);
 
-  // Watchdog FIRST — before any delays
   esp_task_wdt_init(120, false);
 
   esp_reset_reason_t reason = esp_reset_reason();
   if (reason != ESP_RST_DEEPSLEEP) {
-    Serial.println("Non-sleep reset — 10 second flash window");
+    Serial.println("Non-sleep reset — 10s flash window");
     delay(10000);
   } else {
     delay(5000);
@@ -874,68 +908,66 @@ void setup() {
   digitalWrite(PIN_TRUCK_SOURCE, LOW);
   pinMode(PIN_CHARGE_MOSFET, OUTPUT);
   digitalWrite(PIN_CHARGE_MOSFET, LOW);
-
   pinMode(PIN_TRUCK_ADC, INPUT);
   pinMode(PIN_BATT_ADC, INPUT);
 
   analogSetAttenuation(ADC_11db);
-  esp_adc_cal_characterize(
-    ADC_UNIT_1,
-    ADC_ATTEN_DB_12,
-    ADC_WIDTH_BIT_12,
-    1100,
-    &adc_chars
-  );
+  esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_12,
+                            ADC_WIDTH_BIT_12, 1100, &adc_chars);
 
   Wire.begin(PIN_DS3231_SDA, PIN_DS3231_SCL);
-  if (!rtc.begin()) {
-    Serial.println("WARNING: DS3231 not found — using default timestamp");
-  }
+  if (!rtc.begin()) Serial.println("WARNING: DS3231 not found");
 
   if (!LittleFS.begin(true)) {
-    Serial.println("ERROR: LittleFS failed even with format on fail");
+    Serial.println("ERROR: LittleFS failed");
     while (1) delay(100);
   }
   fsReady = true;
 
   File testFile = LittleFS.open("/fstest", "w");
   if (!testFile) {
-    Serial.println("LittleFS not writable — forcing format...");
+    Serial.println("LittleFS not writable — reformatting...");
     fsReady = false;
     LittleFS.end();
     LittleFS.format();
     if (!LittleFS.begin(true)) {
-      Serial.println("ERROR: LittleFS failed after forced format");
+      Serial.println("ERROR: LittleFS failed after format");
       while (1) delay(100);
     }
     fsReady = true;
   } else {
     testFile.close();
     LittleFS.remove("/fstest");
-    Serial.println("LittleFS writable — OK");
+    Serial.println("LittleFS OK");
   }
+
+  // Load config and credentials
+  loadConfig(deviceConfig);
+  loadWiFiCredentials(wifiCreds);
+
+  // Seed from secrets.h on first flash (owner device only)
+#ifdef SEED_FROM_SECRETS
+  if (!deviceConfig.configured) {
+    seedFromSecrets(deviceConfig, wifiCreds);
+  }
+#endif
 
   loadState();
 
-  // Force NTP sync if RTC time is invalid
   DateTime rtcCheck = rtc.now();
   if (rtcCheck.year() < 2020) {
-    debugLog("RTC time invalid — forcing NTP sync");
+    debugLog("RTC invalid — will sync on next connection");
     ntpSynced = false;
     saveState();
   }
 
-  snprintf(TOPIC_TRUCK, sizeof(TOPIC_TRUCK), "%s/feeds/truck-voltage",  AIO_USERNAME);
-  snprintf(TOPIC_BATT,  sizeof(TOPIC_BATT),  "%s/feeds/device-voltage", AIO_USERNAME);
-  snprintf(TOPIC_DEBUG, sizeof(TOPIC_DEBUG), "%s/feeds/debug-messages", AIO_USERNAME);
-  feedTruckVoltage = new Adafruit_MQTT_Publish(&mqtt, TOPIC_TRUCK);
-  feedBattVoltage  = new Adafruit_MQTT_Publish(&mqtt, TOPIC_BATT);
-  feedDebug        = new Adafruit_MQTT_Publish(&mqtt, TOPIC_DEBUG);
+  setupMQTT();
 
   wakeCount++;
   saveState();
 
   debugLog("=== Wake #" + String(wakeCount) +
+           " [" + String(deviceConfig.deviceName) + "]" +
            " reset=" + String((int)reason) +
            (DEBUG_MODE ? " DEBUG" : "") + " ===");
 
@@ -952,16 +984,39 @@ void setup() {
   bool charging     = truckRunning && (battVolts < BATT_START_CHARGE);
 
   debugLog(getTimestamp(now) +
-           " | Raw: "      + String(rawTruck, 3) +
-           "V | Truck: "   + String(truckVolts, 3) +
-           "V | Batt: "    + String(battVolts, 3) +
+           " | Truck: " + String(truckVolts, 3) +
+           "V | Batt: " + String(battVolts, 3) +
            "V | Running: " + (truckRunning ? "YES" : "NO") +
            " | Charging: " + (charging ? "YES" : "NO"));
+
+  // ===== NOT CONFIGURED — start portal immediately =====
+  if (!deviceConfig.configured) {
+    debugLog("Not configured — starting setup portal");
+    WiFi.mode(WIFI_STA);
+    delay(200);
+    startPortal(deviceConfig, wifiCreds);
+
+    while (!deviceConfig.configured) {
+      if (credsUpdated || configUpdated) {
+        handlePortalUpdates(truckVolts, battVolts);
+        if (deviceConfig.configured) break;
+      }
+      delay(500);
+      feedWatchdog();
+    }
+
+    // Refresh readings after portal
+    rawTruck     = readVoltage(PIN_TRUCK_SOURCE, PIN_TRUCK_ADC, TRUCK_DIVIDER_RATIO);
+    truckVolts   = applyTruckCalibration(rawTruck);
+    battVolts    = readBattVoltage();
+    truckRunning = (truckVolts > VOLTAGE_RUNNING);
+    charging     = truckRunning && (battVolts < BATT_START_CHARGE);
+  }
 
   // ===== DEBUG MODE =====
   if (DEBUG_MODE) {
     doDebugCycle(truckVolts, battVolts);
-    debugLog("Debug loop — restarting in " + String(DEBUG_SLEEP_SECONDS) + "s");
+    debugLog("Debug — restarting in " + String(DEBUG_SLEEP_SECONDS) + "s");
     Serial.flush();
     delay(DEBUG_SLEEP_SECONDS * 1000);
     esp_task_wdt_deinit();
@@ -971,16 +1026,20 @@ void setup() {
   // ===== NORMAL OPERATION =====
   digitalWrite(PIN_CHARGE_MOSFET, charging ? HIGH : LOW);
   writePending(now, truckVolts, battVolts, charging);
-
   recordCount++;
   saveState();
-
   debugLog("record " + String(recordCount) + "/" + String(UPLOAD_EVERY));
 
+  // ===== TRUCK RUNNING LOOP =====
   while (truckRunning) {
-    debugLog("Truck running — Charging: " + String(charging ? "YES" : "NO") +
+    debugLog("Running | Charging: " + String(charging ? "YES" : "NO") +
              " | Truck: " + String(truckVolts, 3) +
              "V | Batt: " + String(battVolts, 3) + "V");
+
+    // Check for portal credential updates
+    if (portalActive) {
+      handlePortalUpdates(truckVolts, battVolts);
+    }
 
     for (int i = 0; i < CHARGE_CHECK_SECONDS; i++) {
       delay(1000);
@@ -992,29 +1051,51 @@ void setup() {
     battVolts    = readBattVoltage();
     truckRunning = (truckVolts > VOLTAGE_RUNNING);
 
-    if (charging && (battVolts > BATT_STOP_CHARGE)) {
+    if (charging && battVolts > BATT_STOP_CHARGE) {
       charging = false;
-      debugLog("Charging stopped — batt at " + String(battVolts, 3) + "V");
+      debugLog("Charging stopped — " + String(battVolts, 3) + "V");
     } else if (!charging && truckRunning && battVolts < BATT_START_CHARGE) {
       charging = true;
-      debugLog("Charging started — batt at " + String(battVolts, 3) + "V");
+      debugLog("Charging started — " + String(battVolts, 3) + "V");
     }
 
     digitalWrite(PIN_CHARGE_MOSFET, charging ? HIGH : LOW);
-
     writePending(rtc.now(), truckVolts, battVolts, charging);
     recordCount++;
     saveState();
 
     if (recordCount >= UPLOAD_EVERY) {
-      if (doUploadCycle(truckVolts, battVolts)) {
-        recordCount = 0;
-        saveState();
+      bool uploaded = false;
+
+      if (portalActive) {
+        // Portal running — try WiFi but keep portal open if it fails
+        if (connectWiFi()) {
+          stopPortal();
+          if (!ntpSynced && syncNTP()) { ntpSynced = true; saveState(); }
+          uploadPending();
+          publishLatestReading(truckVolts, battVolts);
+          checkAndApplyOTA();
+          disconnectWiFi();
+          failedScanCount = 0;
+          saveState();
+          uploaded = true;
+        }
+      } else {
+        uploaded = doUploadCycle(truckVolts, battVolts);
+        if (!uploaded) {
+          // Upload failed — start portal so user can update credentials
+          debugLog("Upload failed — starting portal");
+          WiFi.mode(WIFI_STA);
+          delay(200);
+          startPortal(deviceConfig, wifiCreds);
+        }
       }
+
+      if (uploaded) { recordCount = 0; saveState(); }
     }
   }
 
-  debugLog("Truck stopped — proceeding to upload check");
+  debugLog("Truck stopped");
 
   if (recordCount >= UPLOAD_EVERY) {
     if (doUploadCycle(truckVolts, battVolts)) {
