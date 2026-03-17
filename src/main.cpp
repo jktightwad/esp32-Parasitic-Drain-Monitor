@@ -505,7 +505,7 @@ bool connectWiFi() {
         snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
                  bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
         debugLog("Connected: " + WiFi.localIP().toString() +
-                 " RSSI:" + String(WiFi.RSSI()) +
+                 "BEST RSSI:" + String(WiFi.RSSI()) +
                  " ch" + String(WiFi.channel()) +
                  " AP:" + String(bssidStr));
         failedScanCount = 0;

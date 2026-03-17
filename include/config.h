@@ -13,7 +13,7 @@
 #define WIFI_ATTEMPTS_PER_NETWORK  3   // attempts per network before moving to next
 
 // ===== FIRMWARE =====
-#define FIRMWARE_VERSION    "1.0.34" //added debug
+#define FIRMWARE_VERSION    "1.0.35" //added debug
 
 // ===== OTA ===== //additing so it triggers
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
