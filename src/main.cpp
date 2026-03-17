@@ -505,7 +505,7 @@ bool connectWiFi() {
         snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
                  bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
         debugLog("Connected: " + WiFi.localIP().toString() +
-                 "BEST RSSI:" + String(WiFi.RSSI()) +
+                 "RSSI:" + String(WiFi.RSSI()) +
                  " ch" + String(WiFi.channel()) +
                  " AP:" + String(bssidStr));
         failedScanCount = 0;
@@ -780,6 +780,13 @@ void checkAndApplyOTA() {
   }
 
   debugLog("OTA success — rebooting into " + remoteVersion);
+
+  // Publish OTA success before reboot
+  if (connectMQTT()) {
+    String status = "OTA_OK_" + remoteVersion;
+    feedDebug->publish(status.c_str());
+    mqtt.disconnect();
+  }
   Serial.flush();
   delay(500);
   ESP.restart();
@@ -804,7 +811,7 @@ void doDebugCycle(float truckVolts, float battVolts) {
     snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
              bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
 
-    String msg = "RSSI:" + String(WiFi.RSSI()) +
+    String msg = "Best RSSI:" + String(WiFi.RSSI()) +
                  " Ch:" + String(WiFi.channel()) +
                  " AP:" + String(bssidStr) +
                  " Truck:" + String(truckVolts, 3) +
