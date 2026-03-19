@@ -397,7 +397,7 @@ int scanForKnownNetworks(int* visibleIndices, int* visibleRSSI,
     debugLog("  " + scannedSSID + " (" + String(scannedRSSI) + " dBm) ch" + String(scannedCh));
 
     for (int n = 0; n < wifiCreds.count; n++) {
-      if (scannedSSID == String(wifiCreds.networks[n].ssid)) {
+      if (scannedSSID == wifiCreds.networks[n].ssid) {
         if (scannedRSSI > bestRSSI[n]) {
           bestRSSI[n]    = scannedRSSI;
           bestChannel[n] = scannedCh;
@@ -454,7 +454,8 @@ bool connectWiFi() {
 
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);
-  WiFi.mode(WIFI_STA);
+  // Use AP_STA if portal is active so we don't kill the AP
+  WiFi.mode(portalActive ? WIFI_AP_STA : WIFI_STA);
   delay(500);
 
   int     visibleIndices[MAX_WIFI_NETWORKS];
@@ -472,19 +473,21 @@ bool connectWiFi() {
     return false;
   }
 
-  // Full radio reset after scan
-  WiFi.mode(WIFI_OFF);
-  delay(1000);
-  WiFi.persistent(false);
-  WiFi.setAutoReconnect(false);
-  WiFi.mode(WIFI_STA);
-  delay(1000);
+  // Full radio reset after scan — only if portal not running
+  if (!portalActive) {
+    WiFi.mode(WIFI_OFF);
+    delay(1000);
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(false);
+    WiFi.mode(WIFI_STA);
+    delay(1000);
+  }
 
   // Try each visible network up to WIFI_ATTEMPTS_PER_NETWORK times
   for (int i = 0; i < visibleCount; i++) {
     int         netIdx = visibleIndices[i];
-    const char* ssid   = wifiCreds.networks[netIdx].ssid;
-    const char* pass   = wifiCreds.networks[netIdx].pass;
+    const char* ssid   = wifiCreds.networks[netIdx].ssid.c_str();
+    const char* pass   = wifiCreds.networks[netIdx].pass.c_str();
 
     for (int attempt = 1; attempt <= WIFI_ATTEMPTS_PER_NETWORK; attempt++) {
       debugLog("Trying [" + String(ssid) + "] attempt " +
@@ -505,7 +508,7 @@ bool connectWiFi() {
         snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
                  bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
         debugLog("Connected: " + WiFi.localIP().toString() +
-                 "RSSI:" + String(WiFi.RSSI()) +
+                 " RSSI:" + String(WiFi.RSSI()) +
                  " ch" + String(WiFi.channel()) +
                  " AP:" + String(bssidStr));
         failedScanCount = 0;
@@ -528,7 +531,10 @@ bool connectWiFi() {
 void disconnectWiFi() {
   if (mqttReady) mqtt.disconnect();
   WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
+  // Only go fully off if portal is not running
+  if (!portalActive) {
+    WiFi.mode(WIFI_OFF);
+  }
   delay(500);
 }
 
@@ -787,6 +793,7 @@ void checkAndApplyOTA() {
     feedDebug->publish(status.c_str());
     mqtt.disconnect();
   }
+
   Serial.flush();
   delay(500);
   ESP.restart();
@@ -811,7 +818,7 @@ void doDebugCycle(float truckVolts, float battVolts) {
     snprintf(bssidStr, sizeof(bssidStr), "%02X:%02X:%02X:%02X:%02X:%02X",
              bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
 
-    String msg = "Best RSSI:" + String(WiFi.RSSI()) +
+    String msg = "RSSI:" + String(WiFi.RSSI()) +
                  " Ch:" + String(WiFi.channel()) +
                  " AP:" + String(bssidStr) +
                  " Truck:" + String(truckVolts, 3) +
@@ -853,7 +860,6 @@ bool doUploadCycle(float truckVolts, float battVolts) {
 }
 
 // ===== HANDLE PORTAL UPDATES =====
-// Called in main loop to check if portal received new credentials
 bool handlePortalUpdates(float truckVolts, float battVolts) {
   if (!credsUpdated && !configUpdated) return false;
 
@@ -952,12 +958,35 @@ void setup() {
   loadConfig(deviceConfig);
   loadWiFiCredentials(wifiCreds);
 
-  // Seed from secrets.h on first flash (owner device only)
+  // Seed from secrets.h on first flash (owner device only) — runs before migration
 #ifdef SEED_FROM_SECRETS
   if (!deviceConfig.configured) {
     seedFromSecrets(deviceConfig, wifiCreds);
   }
 #endif
+
+  // Migration — populate LittleFS from compiled fallbacks if still empty
+  // Handles devices that OTA'd from old firmware without LittleFS config
+  if (strlen(deviceConfig.deviceName) == 0) {
+    debugLog("Migration: no device name — applying fallback");
+    strlcpy(deviceConfig.deviceName,  FALLBACK_DEVICE_NAME, sizeof(deviceConfig.deviceName));
+    strlcpy(deviceConfig.aioUsername, AIO_USERNAME,         sizeof(deviceConfig.aioUsername));
+    strlcpy(deviceConfig.aioKey,      AIO_KEY,              sizeof(deviceConfig.aioKey));
+    deviceConfig.configured = true;
+    saveConfig(deviceConfig);
+    debugLog("Migration: config saved — device: " + String(deviceConfig.deviceName));
+  }
+
+  if (wifiCreds.count == 0) {
+    debugLog("Migration: no WiFi credentials — applying fallback");
+    for (int i = 0; i < WIFI_COUNT && i < MAX_WIFI_NETWORKS; i++) {
+      wifiCreds.networks[i].ssid = String(WIFI_SSIDS[i]);
+      wifiCreds.networks[i].pass = String(WIFI_PASSWORDS[i]);
+      wifiCreds.count++;
+    }
+    saveWiFiCredentials(wifiCreds);
+    debugLog("Migration: WiFi saved — " + String(wifiCreds.count) + " networks");
+  }
 
   loadState();
 
@@ -999,7 +1028,7 @@ void setup() {
   // ===== NOT CONFIGURED — start portal immediately =====
   if (!deviceConfig.configured) {
     debugLog("Not configured — starting setup portal");
-    WiFi.mode(WIFI_STA);
+    WiFi.mode(WIFI_AP_STA);
     delay(200);
     startPortal(deviceConfig, wifiCreds);
 
@@ -1042,7 +1071,7 @@ void setup() {
     debugLog("Running | Charging: " + String(charging ? "YES" : "NO") +
              " | Truck: " + String(truckVolts, 3) +
              "V | Batt: " + String(battVolts, 3) + "V");
-
+    portalLoop();  // process DNS requests if portal active
     // Check for portal credential updates
     if (portalActive) {
       handlePortalUpdates(truckVolts, battVolts);
@@ -1092,7 +1121,7 @@ void setup() {
         if (!uploaded) {
           // Upload failed — start portal so user can update credentials
           debugLog("Upload failed — starting portal");
-          WiFi.mode(WIFI_STA);
+          WiFi.mode(WIFI_AP_STA);
           delay(200);
           startPortal(deviceConfig, wifiCreds);
         }

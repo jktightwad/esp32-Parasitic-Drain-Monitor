@@ -13,8 +13,6 @@
 
 #define MAX_WIFI_NETWORKS  10
 #define MAX_DEVICE_NAME    32
-#define MAX_SSID_LEN       33
-#define MAX_PASS_LEN       65
 #define MAX_AIO_LEN        64
 
 // ===== DEVICE CONFIG =====
@@ -22,13 +20,13 @@ struct DeviceConfig {
   char deviceName[MAX_DEVICE_NAME] = "";
   char aioUsername[MAX_AIO_LEN]    = "";
   char aioKey[MAX_AIO_LEN]         = "";
-  bool configured                  = false;  // true after first setup complete
+  bool configured                  = false;
 };
 
 // ===== WIFI CREDENTIAL ENTRY =====
 struct WiFiCredential {
-  char ssid[MAX_SSID_LEN] = "";
-  char pass[MAX_PASS_LEN] = "";
+  String ssid = "";
+  String pass = "";
 };
 
 // ===== WIFI CREDENTIAL LIST =====
@@ -50,9 +48,9 @@ bool loadConfig(DeviceConfig& cfg) {
 
   if (err) return false;
 
-  strlcpy(cfg.deviceName, doc["deviceName"] | "", sizeof(cfg.deviceName));
+  strlcpy(cfg.deviceName,  doc["deviceName"]  | "", sizeof(cfg.deviceName));
   strlcpy(cfg.aioUsername, doc["aioUsername"] | "", sizeof(cfg.aioUsername));
-  strlcpy(cfg.aioKey,      doc["aioKey"] | "",      sizeof(cfg.aioKey));
+  strlcpy(cfg.aioKey,      doc["aioKey"]      | "", sizeof(cfg.aioKey));
   cfg.configured = doc["configured"] | false;
 
   return true;
@@ -91,8 +89,8 @@ bool loadWiFiCredentials(WiFiCredentials& creds) {
   JsonArray arr = doc["networks"].as<JsonArray>();
   for (JsonObject net : arr) {
     if (creds.count >= MAX_WIFI_NETWORKS) break;
-    strlcpy(creds.networks[creds.count].ssid, net["ssid"] | "", MAX_SSID_LEN);
-    strlcpy(creds.networks[creds.count].pass, net["pass"] | "", MAX_PASS_LEN);
+    creds.networks[creds.count].ssid = net["ssid"] | "";
+    creds.networks[creds.count].pass = net["pass"] | "";
     creds.count++;
   }
 
@@ -119,20 +117,18 @@ bool saveWiFiCredentials(const WiFiCredentials& creds) {
 }
 
 // ===== ADD WIFI NETWORK =====
-// Returns false if already at max capacity or SSID already exists
 bool addWiFiNetwork(WiFiCredentials& creds, const char* ssid, const char* pass) {
   if (creds.count >= MAX_WIFI_NETWORKS) return false;
 
-  // Update password if SSID already exists
   for (int i = 0; i < creds.count; i++) {
-    if (strcmp(creds.networks[i].ssid, ssid) == 0) {
-      strlcpy(creds.networks[i].pass, pass, MAX_PASS_LEN);
+    if (creds.networks[i].ssid == String(ssid)) {
+      creds.networks[i].pass = String(pass);
       return saveWiFiCredentials(creds);
     }
   }
 
-  strlcpy(creds.networks[creds.count].ssid, ssid, MAX_SSID_LEN);
-  strlcpy(creds.networks[creds.count].pass, pass, MAX_PASS_LEN);
+  creds.networks[creds.count].ssid = String(ssid);
+  creds.networks[creds.count].pass = String(pass);
   creds.count++;
   return saveWiFiCredentials(creds);
 }
@@ -149,21 +145,17 @@ bool removeWiFiNetwork(WiFiCredentials& creds, int index) {
 }
 
 // ===== SEED FROM SECRETS (first flash only) =====
-// Called on first boot to populate LittleFS from compiled-in secrets
-// so the device owner doesn't have to go through the portal
 #ifdef SEED_FROM_SECRETS
 void seedFromSecrets(DeviceConfig& cfg, WiFiCredentials& creds) {
-  if (cfg.configured) return;  // already set up, don't overwrite
+  if (cfg.configured) return;
 
-  // Populate WiFi from secrets.h arrays
   for (int i = 0; i < WIFI_COUNT && i < MAX_WIFI_NETWORKS; i++) {
-    strlcpy(creds.networks[i].ssid, WIFI_SSIDS[i], MAX_SSID_LEN);
-    strlcpy(creds.networks[i].pass, WIFI_PASSWORDS[i], MAX_PASS_LEN);
+    creds.networks[i].ssid = String(WIFI_SSIDS[i]);
+    creds.networks[i].pass = String(WIFI_PASSWORDS[i]);
     creds.count++;
   }
   saveWiFiCredentials(creds);
 
-  // Populate device config from secrets.h
   strlcpy(cfg.deviceName,  DEVICE_NAME,  sizeof(cfg.deviceName));
   strlcpy(cfg.aioUsername, AIO_USERNAME, sizeof(cfg.aioUsername));
   strlcpy(cfg.aioKey,      AIO_KEY,      sizeof(cfg.aioKey));
