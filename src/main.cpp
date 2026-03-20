@@ -552,10 +552,11 @@ void publishLatestReading(float truckVolts, float battVolts) {
   debugLog(ok2 ? "MQTT batt: "  + String(battVolts, 3)  + "V" : "MQTT batt failed");
 
   if (deviceConfig.debugMode && feedDebug) {
-    String msg = "WiFi_FALLBACK RSSI:" + String(WiFi.RSSI()) +
-                 " Truck:" + String(truckVolts, 3) +
-                 " Batt:" + String(battVolts, 3) +
-                 " BLEFails:" + String(bleFailCount);
+    String msg = "v:" + String(VOLTMON_VERSION) +
+             " WiFi_FALLBACK RSSI:" + String(WiFi.RSSI()) +
+             " Truck:" + String(truckVolts, 3) +
+             " Batt:" + String(battVolts, 3) +
+             " BLEFails:" + String(bleFailCount);
     feedDebug->publish(msg.c_str());
   }
 

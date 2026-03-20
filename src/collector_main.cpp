@@ -52,7 +52,6 @@ void clearActivity() {
   setActivityLED(COLOR_OFF);
 }
 
-// Chase animation on activity LEDs
 void animateChase(uint32_t color, int delayMs = 50) {
   for (int i = 0; i < LED_ACTIVITY_COUNT; i++) {
     for (int j = LED_ACTIVITY_START; j < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; j++) {
@@ -64,29 +63,23 @@ void animateChase(uint32_t color, int delayMs = 50) {
   }
 }
 
-// Pulse animation on activity LEDs
 void animatePulse(uint32_t color, int steps = 20, int delayMs = 30) {
-  // Fade in
   for (int i = 0; i <= steps; i++) {
     uint8_t r = ((color >> 16) & 0xFF) * i / steps;
     uint8_t g = ((color >> 8)  & 0xFF) * i / steps;
     uint8_t b = ((color)       & 0xFF) * i / steps;
-    uint32_t c = strip.Color(r, g, b);
-    setActivityLED(c);
+    setActivityLED(strip.Color(r, g, b));
     delay(delayMs);
   }
-  // Fade out
   for (int i = steps; i >= 0; i--) {
     uint8_t r = ((color >> 16) & 0xFF) * i / steps;
     uint8_t g = ((color >> 8)  & 0xFF) * i / steps;
     uint8_t b = ((color)       & 0xFF) * i / steps;
-    uint32_t c = strip.Color(r, g, b);
-    setActivityLED(c);
+    setActivityLED(strip.Color(r, g, b));
     delay(delayMs);
   }
 }
 
-// Flash activity LEDs
 void flashActivity(uint32_t color, int times = 3, int delayMs = 150) {
   for (int i = 0; i < times; i++) {
     setActivityLED(color);
@@ -97,9 +90,12 @@ void flashActivity(uint32_t color, int times = 3, int delayMs = 150) {
 }
 
 // ===== GLOBALS =====
-bool fsReady   = false;
-bool mqttReady = false;
-bool wifiConnected = false;
+bool fsReady         = false;
+bool mqttReady       = false;
+bool wifiConnected   = false;
+bool hasPendingBuffer = false;  // tracks whether col_pending.csv has data
+
+#define COLLECTOR_PENDING_FILE  "/col_pending.csv"
 
 WiFiClient           mqttWifiClient;
 Adafruit_MQTT_Client mqtt(&mqttWifiClient, AIO_SERVER, AIO_PORT, "", "");
@@ -113,9 +109,6 @@ Adafruit_MQTT_Publish*   feedTruckVoltage = nullptr;
 Adafruit_MQTT_Publish*   feedBattVoltage  = nullptr;
 Adafruit_MQTT_Publish*   feedDebug        = nullptr;
 Adafruit_MQTT_Subscribe* feedControl      = nullptr;
-
-// Collector pending buffer file
-#define COLLECTOR_PENDING_FILE  "/col_pending.csv"
 
 // ===== WATCHDOG =====
 void feedWatchdog() { esp_task_wdt_reset(); }
@@ -147,10 +140,21 @@ bool initFS() {
     LittleFS.end();
     LittleFS.format();
     if (!LittleFS.begin(true)) return false;
-  } else {
-    f.close();
-    LittleFS.remove("/fstest");
+    // Try again after format
+    f = LittleFS.open("/fstest", "w");
+    if (!f) return false;
   }
+  f.close();
+  LittleFS.remove("/fstest");
+
+  // Check if pending buffer already exists from previous session
+  File pf = LittleFS.open(COLLECTOR_PENDING_FILE, "r");
+  if (pf && pf.size() > 0) {
+    hasPendingBuffer = true;
+    Serial.println("Found existing pending buffer — " + String(pf.size()) + " bytes");
+  }
+  if (pf) pf.close();
+
   return true;
 }
 
@@ -160,9 +164,9 @@ void setupMQTT() {
   new (&mqtt) Adafruit_MQTT_Client(&mqttWifiClient, AIO_SERVER, AIO_PORT,
                                     AIO_USERNAME, AIO_KEY);
 
-  snprintf(TOPIC_TRUCK,   sizeof(TOPIC_TRUCK),   "%s/feeds/truck-voltage",  AIO_USERNAME);
-  snprintf(TOPIC_BATT,    sizeof(TOPIC_BATT),    "%s/feeds/device-voltage", AIO_USERNAME);
-  snprintf(TOPIC_DEBUG,   sizeof(TOPIC_DEBUG),   "%s/feeds/debug-messages", AIO_USERNAME);
+  snprintf(TOPIC_TRUCK,   sizeof(TOPIC_TRUCK),   "%s/feeds/truck-voltage",   AIO_USERNAME);
+  snprintf(TOPIC_BATT,    sizeof(TOPIC_BATT),    "%s/feeds/device-voltage",  AIO_USERNAME);
+  snprintf(TOPIC_DEBUG,   sizeof(TOPIC_DEBUG),   "%s/feeds/debug-messages",  AIO_USERNAME);
   snprintf(TOPIC_CONTROL, sizeof(TOPIC_CONTROL), "%s/feeds/voltmon-control", AIO_USERNAME);
 
   delete feedTruckVoltage;
@@ -176,6 +180,7 @@ void setupMQTT() {
   feedControl      = new Adafruit_MQTT_Subscribe(&mqtt, TOPIC_CONTROL);
 
   mqtt.subscribe(feedControl);
+  memset(feedControl->lastread, 0, sizeof(feedControl->lastread));
   mqttReady = true;
 }
 
@@ -192,7 +197,6 @@ bool connectWiFi() {
   Serial.println("WiFi PASS length: " + String(strlen(WIFI_PASSWORDS[0])));
   WiFi.begin(WIFI_SSIDS[0], WIFI_PASSWORDS[0]);
 
-
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 40) {
     delay(500);
@@ -201,13 +205,14 @@ bool connectWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected: " + WiFi.localIP().toString());
+    Serial.println("WiFi connected: " + WiFi.localIP().toString() +
+                   " RSSI:" + String(WiFi.RSSI()));
     setWiFiLED(COLOR_GREEN);
     wifiConnected = true;
     return true;
   }
 
-  Serial.println("WiFi failed");
+  Serial.println("WiFi failed — status: " + String(WiFi.status()));
   setWiFiLED(COLOR_RED);
   wifiConnected = false;
   return false;
@@ -239,18 +244,21 @@ bool connectMQTT() {
   return mqtt.connected();
 }
 
-// ===== BUFFER RECORDS TO COLLECTOR PENDING =====
+// ===== BUFFER RECORDS =====
 void bufferRecords(const String& deviceId, const String& records) {
-  // Parse pipe-delimited records and prefix each with device ID
-  // Format stored: deviceId,timestamp,truckV,battV,charging
-  File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a", true);  // true = create if not exists
-  if (!f) {
-    Serial.println("ERROR: Cannot open collector pending");
+  if (deviceId.length() == 0 || records.length() == 0) {
+    Serial.println("bufferRecords: skipping empty data");
     return;
   }
 
-  // Records arrive as: ts,truckV,battV,charging|ts,truckV,battV,charging|...
+  File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a", true);
+  if (!f) {
+    Serial.println("ERROR: Cannot open collector pending for write");
+    return;
+  }
+
   int start = 0;
+  int written = 0;
   while (start < (int)records.length()) {
     int end = records.indexOf('|', start);
     if (end < 0) end = records.length();
@@ -258,22 +266,33 @@ void bufferRecords(const String& deviceId, const String& records) {
     record.trim();
     if (record.length() > 0) {
       f.println(deviceId + "," + record);
+      written++;
     }
     start = end + 1;
   }
-
   f.close();
-  Serial.println("Buffered records for device: " + deviceId);
+
+  hasPendingBuffer = true;
+  Serial.println("Buffered " + String(written) + " records for: " + deviceId);
 }
 
 // ===== UPLOAD BUFFERED RECORDS =====
 bool uploadBuffered() {
-  if (!LittleFS.exists(COLLECTOR_PENDING_FILE)) return true;  // nothing to do
+  if (!hasPendingBuffer) return true;
 
   File f = LittleFS.open(COLLECTOR_PENDING_FILE, "r");
-  if (!f) return false;
+  if (!f) {
+    hasPendingBuffer = false;
+    return true;
+  }
 
-  // Group records by device ID
+  if (f.size() == 0) {
+    f.close();
+    LittleFS.remove(COLLECTOR_PENDING_FILE);
+    hasPendingBuffer = false;
+    return true;
+  }
+
   struct DeviceRecords {
     String deviceId;
     String compact;
@@ -288,19 +307,14 @@ bool uploadBuffered() {
     line.trim();
     if (line.length() == 0) continue;
 
-    // First field is device ID
     int comma1 = line.indexOf(',');
     if (comma1 < 0) continue;
     String deviceId = line.substring(0, comma1);
     String record   = line.substring(comma1 + 1);
 
-    // Find or create group
     int groupIdx = -1;
     for (int i = 0; i < groupCount; i++) {
-      if (groups[i].deviceId == deviceId) {
-        groupIdx = i;
-        break;
-      }
+      if (groups[i].deviceId == deviceId) { groupIdx = i; break; }
     }
     if (groupIdx < 0 && groupCount < 10) {
       groups[groupCount].deviceId = deviceId;
@@ -316,11 +330,17 @@ bool uploadBuffered() {
   }
   f.close();
 
+  if (groupCount == 0) {
+    LittleFS.remove(COLLECTOR_PENDING_FILE);
+    hasPendingBuffer = false;
+    return true;
+  }
+
   bool allOk = true;
 
   for (int g = 0; g < groupCount; g++) {
     Serial.println("Uploading " + String(groups[g].count) +
-                   " records for device: " + groups[g].deviceId);
+                   " records for: " + groups[g].deviceId);
 
     String payload = "device=" + groups[g].deviceId + "&d=" + groups[g].compact;
     payload.replace(" ", "%20");
@@ -328,10 +348,8 @@ bool uploadBuffered() {
     WiFiClientSecure secureClient;
     secureClient.setInsecure();
 
-    String url = String(GS_SCRIPT_URL) + "?" + payload;
-
     HTTPClient http;
-    http.begin(secureClient, url);
+    http.begin(secureClient, String(GS_SCRIPT_URL) + "?" + payload);
     http.setTimeout(15000);
     http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
@@ -346,13 +364,14 @@ bool uploadBuffered() {
 
     if (response.indexOf("\"ok\"") < 0) {
       allOk = false;
-      Serial.println("Upload failed for device: " + groups[g].deviceId);
+      Serial.println("Upload failed for: " + groups[g].deviceId);
     }
   }
 
   if (allOk) {
     LittleFS.remove(COLLECTOR_PENDING_FILE);
-    Serial.println("All buffered records uploaded");
+    hasPendingBuffer = false;
+    Serial.println("All records uploaded and buffer cleared");
     setUploadLED(COLOR_GREEN);
   } else {
     Serial.println("Some uploads failed — keeping buffer");
@@ -369,18 +388,17 @@ void publishToMQTT(const String& deviceId, const String& records) {
     return;
   }
 
-  // Parse last record for latest voltage readings
   float lastTruck = 0, lastBatt = 0;
-  int lastPipe = records.lastIndexOf('|');
-  String lastRecord = (lastPipe >= 0) ? records.substring(lastPipe + 1) : records;
+  int lastPipe    = records.lastIndexOf('|');
+  String lastRec  = (lastPipe >= 0) ? records.substring(lastPipe + 1) : records;
 
-  int c1 = lastRecord.indexOf(',');
-  int c2 = lastRecord.indexOf(',', c1 + 1);
-  int c3 = lastRecord.lastIndexOf(',');
+  int c1 = lastRec.indexOf(',');
+  int c2 = lastRec.indexOf(',', c1 + 1);
+  int c3 = lastRec.lastIndexOf(',');
 
   if (c1 > 0 && c2 > 0) {
-    lastTruck = lastRecord.substring(c1 + 1, c2).toFloat();
-    lastBatt  = lastRecord.substring(c2 + 1, c3).toFloat();
+    lastTruck = lastRec.substring(c1 + 1, c2).toFloat();
+    lastBatt  = lastRec.substring(c2 + 1, c3).toFloat();
   }
 
   feedTruckVoltage->publish(lastTruck);
@@ -389,22 +407,18 @@ void publishToMQTT(const String& deviceId, const String& records) {
   String dbg = "BLE_RX device:" + deviceId +
                " Truck:" + String(lastTruck, 3) +
                " Batt:" + String(lastBatt, 3) +
-               " Records:" + String(records.length()) +
                " CollectorV:" + String(COLLECTOR_VERSION);
   feedDebug->publish(dbg.c_str());
 
   mqtt.disconnect();
-  Serial.println("MQTT published for device: " + deviceId);
+  Serial.println("MQTT published for: " + deviceId);
 }
 
 // ===== CHECK MQTT CONTROL MESSAGES =====
 void checkControlMessages() {
   if (!connectMQTT()) return;
 
-  // Process incoming messages
-  Adafruit_MQTT_Subscribe* sub;
   unsigned long start = millis();
-
   while (millis() - start < 2000) {
     mqtt.processPackets(500);
     feedWatchdog();
@@ -413,16 +427,12 @@ void checkControlMessages() {
       String cmd = String((char*)feedControl->lastread);
       cmd.trim();
       Serial.println("Control message: " + cmd);
-
-      // Clear the message
       memset(feedControl->lastread, 0, sizeof(feedControl->lastread));
 
-      // Parse command — format: command=value:deviceId or command:ALL
       if (cmd.startsWith("debug=on")) {
         String target = cmd.indexOf(':') > 0 ? cmd.substring(cmd.indexOf(':') + 1) : "ALL";
-        String bleCmd = "DEBUG_ON";
         if (target == "ALL" || target == FALLBACK_DEVICE_NAME) {
-          bleSetPendingCommand(bleCmd);
+          bleSetPendingCommand("DEBUG_ON");
           Serial.println("Debug ON queued for: " + target);
         }
       } else if (cmd.startsWith("debug=off")) {
@@ -432,16 +442,13 @@ void checkControlMessages() {
           Serial.println("Debug OFF queued for: " + target);
         }
       } else if (cmd.startsWith("sleep=")) {
-        int colonIdx = cmd.indexOf(':');
+        int colonIdx  = cmd.indexOf(':');
         String value  = (colonIdx > 0) ? cmd.substring(6, colonIdx) : cmd.substring(6);
         String target = (colonIdx > 0) ? cmd.substring(colonIdx + 1) : "ALL";
         if (target == "ALL" || target == FALLBACK_DEVICE_NAME) {
           bleSetPendingCommand("SLEEP:" + value);
           Serial.println("Sleep " + value + "s queued for: " + target);
         }
-      } else if (cmd.startsWith("ota")) {
-        Serial.println("OTA check requested — will check on next WiFi cycle");
-        // OTA handled in main loop
       } else if (cmd == "reboot") {
         Serial.println("Reboot command received");
         delay(500);
@@ -486,11 +493,10 @@ void checkAndApplyOTA() {
   Serial.println("Collector local: " + String(COLLECTOR_VERSION) +
                  " remote: " + remoteVersion);
 
-  if (remoteVer <= localVer) { Serial.println("Collector firmware up to date"); return; }
+  if (remoteVer <= localVer) { Serial.println("Collector up to date"); return; }
 
   Serial.println("Updating collector to " + remoteVersion + "...");
   setActivityLED(COLOR_PURPLE);
-
   esp_task_wdt_init(300, false);
 
   http.begin(secureClient, COLLECTOR_OTA_FIRMWARE_URL);
@@ -518,8 +524,8 @@ void checkAndApplyOTA() {
     return;
   }
 
-  WiFiClient* stream  = http.getStreamPtr();
-  size_t written      = 0;
+  WiFiClient* stream       = http.getStreamPtr();
+  size_t written           = 0;
   uint8_t buf[512];
   unsigned long lastFeed     = millis();
   unsigned long lastProgress = millis();
@@ -533,8 +539,6 @@ void checkAndApplyOTA() {
     }
     if (millis() - lastFeed > 5000)      { feedWatchdog(); lastFeed = millis(); }
     if (millis() - lastProgress > 10000) {
-      Serial.println("OTA: " + String(written * 100 / contentLength) + "%");
-      // Animate progress on activity LEDs
       int ledsOn = (written * LED_ACTIVITY_COUNT) / contentLength;
       for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
         strip.setPixelColor(i, (i - LED_ACTIVITY_START) < ledsOn ? COLOR_PURPLE : COLOR_OFF);
@@ -568,13 +572,11 @@ void setup() {
 
   Serial.println("\n=== VoltMon Collector v" + String(COLLECTOR_VERSION) + " ===");
 
-  // Init NeoPixel
   strip.begin();
   strip.setBrightness(VM_NEOPIXEL_BRIGHTNESS);
   strip.clear();
   strip.show();
 
-  // Startup animation — sweep white across all LEDs
   for (int i = 0; i < VM_NEOPIXEL_COUNT; i++) {
     strip.setPixelColor(i, COLOR_WHITE);
     strip.show();
@@ -584,12 +586,10 @@ void setup() {
   strip.clear();
   strip.show();
 
-  // Set initial LED states
   setWiFiLED(COLOR_YELLOW);
   setUploadLED(COLOR_OFF);
   clearActivity();
 
-  // Init LittleFS
   fsReady = initFS();
   if (!fsReady) {
     Serial.println("FATAL: LittleFS failed");
@@ -598,18 +598,14 @@ void setup() {
   }
   Serial.println("LittleFS OK");
 
-  // Connect WiFi
   if (!connectWiFi()) {
     Serial.println("WARNING: WiFi failed on startup — will retry in loop");
   }
 
-  // Setup MQTT
   setupMQTT();
-
-  // Init BLE collector
   collectorBleInit();
 
-  Serial.println("Collector ready — scanning for VoltMon devices");
+  Serial.println("Collector ready — waiting for VoltMon");
   setActivityLED(COLOR_DIM_BLUE);
 }
 
@@ -617,14 +613,17 @@ void setup() {
 void loop() {
   feedWatchdog();
 
-  // Maintain WiFi
   maintainWiFi();
 
-  // Check for BLE data received from VoltMon
+  // Handle BLE data received from VoltMon
   if (bleDataReceived()) {
     String deviceId = bleGetDeviceId();
     String records  = bleGetRecords();
     bool   isEmpty  = bleGotEmpty();
+
+    Serial.println("BLE data — deviceId:[" + deviceId +
+                   "] len:" + String(records.length()) +
+                   " empty:" + String(isEmpty));
 
     if (isEmpty) {
       Serial.println("BLE: VoltMon has no pending records");
@@ -634,10 +633,8 @@ void loop() {
                      " bytes from " + deviceId);
       setActivityLED(COLOR_WHITE);
 
-      // Buffer records first — collector owns them now
       bufferRecords(deviceId, records);
 
-      // Attempt immediate upload
       if (wifiConnected) {
         setActivityLED(COLOR_CYAN);
         bool ok = uploadBuffered();
@@ -646,22 +643,22 @@ void loop() {
           publishToMQTT(deviceId, records);
         } else {
           flashActivity(COLOR_RED, 3, 150);
-          setUploadLED(COLOR_YELLOW);  // pending
+          setUploadLED(COLOR_YELLOW);
         }
       } else {
-        Serial.println("WiFi down — records buffered for later upload");
+        Serial.println("WiFi down — records buffered");
         setUploadLED(COLOR_YELLOW);
         flashActivity(COLOR_RED, 2, 200);
       }
     }
 
     bleClearReceived();
-    setActivityLED(COLOR_DIM_BLUE);  // back to idle/scanning
+    setActivityLED(COLOR_DIM_BLUE);
   }
 
-  // Retry buffered uploads if WiFi is up
+  // Retry buffered uploads — uses flag, not LittleFS.exists()
   static unsigned long lastUploadRetry = 0;
-  if (wifiConnected && LittleFS.exists(COLLECTOR_PENDING_FILE)) {
+  if (wifiConnected && hasPendingBuffer) {
     if (millis() - lastUploadRetry > COLLECTOR_UPLOAD_RETRY_MS) {
       Serial.println("Retrying buffered upload...");
       setActivityLED(COLOR_CYAN);
@@ -687,7 +684,7 @@ void loop() {
     lastOTACheck = millis();
   }
 
-  // Idle animation — slow pulse on activity LEDs when scanning
+  // Idle pulse animation
   static unsigned long lastPulse = 0;
   if (!collectorConnected && millis() - lastPulse > 3000) {
     animatePulse(COLOR_BLUE, 15, 20);
