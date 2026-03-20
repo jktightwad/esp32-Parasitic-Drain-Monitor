@@ -4,7 +4,7 @@
 #define FALLBACK_DEVICE_NAME  "2021AT4"
 
 // ==== DEBUG MODE ====
-#define DEBUG_MODE  false  // set true to enable remote debugging
+#define DEBUG_MODE  true  // set true to enable remote debugging
 #define DEBUG_SLEEP_SECONDS  15      // loop interval in debug mode
 
 // ===== NETWORK =====
@@ -14,7 +14,7 @@
 #define WIFI_ATTEMPTS_PER_NETWORK  3   // attempts per network before moving to next
 
 // ===== FIRMWARE =====
-#define FIRMWARE_VERSION    "1.1.1" //added debug
+#define FIRMWARE_VERSION    "1.1.2" //added debug
 
 // ===== OTA ===== //additing so it triggers
 #define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
