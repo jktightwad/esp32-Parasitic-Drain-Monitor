@@ -187,7 +187,11 @@ bool connectWiFi() {
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);
   WiFi.mode(WIFI_STA);
+
+  Serial.println("WiFi SSID: [" + String(WIFI_SSIDS[0]) + "]");
+  Serial.println("WiFi PASS length: " + String(strlen(WIFI_PASSWORDS[0])));
   WiFi.begin(WIFI_SSIDS[0], WIFI_PASSWORDS[0]);
+
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 40) {

@@ -3,10 +3,10 @@
 #include "secrets.h"
 
 // ===== VOLTMON VERSION =====
-#define VOLTMON_VERSION     "2.0.0"
+#define VOLTMON_VERSION     "2.0.1"
 
 // ===== COLLECTOR VERSION =====
-#define COLLECTOR_VERSION   "1.0.0"
+#define COLLECTOR_VERSION   "1.0.1"
 
 // ===== VOLTMON OTA =====
 #define VOLTMON_OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/voltmon/version.txt"
@@ -67,8 +67,8 @@
 #define MAX_PENDING_RECORDS  100
 
 // ===== TIMING — VoltMon =====
-#define SLEEP_SECONDS        300
-#define UPLOAD_EVERY         12
+#define SLEEP_SECONDS        30 //how many seconds to sleep
+#define UPLOAD_EVERY         3 //how many to store before posting
 const int CHARGE_CHECK_SECONDS = (SLEEP_SECONDS < 60) ? SLEEP_SECONDS : 60;
 
 // ===== TIMING — Collector =====
