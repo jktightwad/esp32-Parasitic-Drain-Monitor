@@ -1,34 +1,58 @@
 #pragma once
 
 #include "secrets.h"
-#define FALLBACK_DEVICE_NAME  "2021AT4"
 
-// ==== DEBUG MODE ====
-#define DEBUG_MODE  true  // set true to enable remote debugging
-#define DEBUG_SLEEP_SECONDS  15      // loop interval in debug mode
+// ===== VOLTMON VERSION =====
+#define VOLTMON_VERSION     "2.0.0"
+
+// ===== COLLECTOR VERSION =====
+#define COLLECTOR_VERSION   "1.0.0"
+
+// ===== VOLTMON OTA =====
+#define VOLTMON_OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/voltmon/version.txt"
+#define VOLTMON_OTA_FIRMWARE_URL "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/voltmon/firmware.bin"
+
+// ===== COLLECTOR OTA =====
+#define COLLECTOR_OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/collector/version.txt"
+#define COLLECTOR_OTA_FIRMWARE_URL "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/collector/firmware.bin"
+
+// ===== BLE =====
+#define BLE_DEVICE_NAME          "VoltMon"
+#define BLE_SERVICE_UUID         "4fafc201-1fb5-459e-8fcc-c5c9c3319123"
+#define BLE_RECORDS_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define BLE_CONFIRM_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a9"
+#define BLE_DEVICE_ID_CHAR_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26aa"
+#define BLE_OTA_CHAR_UUID        "beb5483e-36e1-4688-b7f5-ea07361b26ab"
+#define BLE_OTA_CTRL_CHAR_UUID   "beb5483e-36e1-4688-b7f5-ea07361b26ac"
 
 // ===== NETWORK =====
 #define AIO_SERVER      "io.adafruit.com"
 #define AIO_PORT        1883
 #define NTP_SERVER      "pool.ntp.org"
-#define WIFI_ATTEMPTS_PER_NETWORK  3   // attempts per network before moving to next
 
-// ===== FIRMWARE =====
-#define FIRMWARE_VERSION    "1.1.2" //added debug
+// ===== WIFI =====
+#define WIFI_ATTEMPTS_PER_NETWORK  1   // fallback only — single attempt per network
 
-// ===== OTA ===== //additing so it triggers
-#define OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/version.txt"
-#define OTA_FIRMWARE_URL "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/firmware.bin"
-
-// ===== PINS =====
+// ===== PINS — VoltMon =====
 #define PIN_TRUCK_SOURCE     0
-//#define PIN_TRUCK_ADC        1
-//#define PIN_BATT_ADC         4
 #define PIN_TRUCK_ADC        4
 #define PIN_BATT_ADC         1
 #define PIN_CHARGE_MOSFET    7
 #define PIN_DS3231_SDA       9
 #define PIN_DS3231_SCL       8
+
+// ===== PINS — Collector =====
+#define VM_PIN_NEOPIXEL      3    // renamed to avoid collision with framework PIN_NEOPIXEL
+#define VM_NEOPIXEL_COUNT    18
+#define VM_NEOPIXEL_BRIGHTNESS  80
+
+// ===== LED LAYOUT =====
+#define LED_WIFI_START       0
+#define LED_WIFI_COUNT       3
+#define LED_ACTIVITY_START   3
+#define LED_ACTIVITY_COUNT   12
+#define LED_UPLOAD_START     15
+#define LED_UPLOAD_COUNT     3
 
 // ===== VOLTAGE DIVIDER RATIOS =====
 #define TRUCK_DIVIDER_RATIO  (55.0 / 9.9)
@@ -38,18 +62,18 @@
 #define ADC_SAMPLES          16
 
 // ===== FILE SETTINGS =====
-#define PENDING_FILE         "/pending.csv"
-#define ARCHIVE_FILE         "/archive.csv"
-#define DEBUG_FILE           "/debug.log"
-#define STATE_FILE           "/state.json"
 #define MAX_ARCHIVE_SIZE     800000
 #define MAX_DEBUG_SIZE       100000
 #define MAX_PENDING_RECORDS  100
 
-// ===== TIMING =====
-#define SLEEP_SECONDS        300    // testing — change to 300 for final
-#define UPLOAD_EVERY         6     // testing — change to 12 for final
+// ===== TIMING — VoltMon =====
+#define SLEEP_SECONDS        300
+#define UPLOAD_EVERY         12
 const int CHARGE_CHECK_SECONDS = (SLEEP_SECONDS < 60) ? SLEEP_SECONDS : 60;
+
+// ===== TIMING — Collector =====
+#define COLLECTOR_BLE_SCAN_SECONDS   10
+#define COLLECTOR_UPLOAD_RETRY_MS    30000
 
 // ===== VOLTAGE THRESHOLDS =====
 #define VOLTAGE_RUNNING      12.9
@@ -58,8 +82,10 @@ const int CHARGE_CHECK_SECONDS = (SLEEP_SECONDS < 60) ? SLEEP_SECONDS : 60;
 #define BATT_START_CHARGE    3.50
 #define BATT_STOP_CHARGE     3.58
 
+// ===== FALLBACK DEVICE NAME =====
+#define FALLBACK_DEVICE_NAME  "2021AT4"
+
 // ===== TRUCK VOLTAGE CALIBRATION =====
-// Format: {raw_reading, actual_voltage}
 const float TRUCK_CAL_TABLE[][2] = {
   {4.006,  4.0},
   {4.983,  5.0},
@@ -82,3 +108,7 @@ const float BATT_CAL_TABLE[][2] = {
   {4.140, 4.110}
 };
 const int BATT_CAL_TABLE_SIZE = 2;
+
+// ===== DEBUG MODE =====
+#define DEBUG_MODE           false
+#define DEBUG_SLEEP_SECONDS  15

@@ -18,12 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extract version from config.h
-        id: version
+      - name: Extract VoltMon version from config.h
+        id: voltmon_version
         run: |
-          VERSION=$(grep '#define FIRMWARE_VERSION' include/config.h | sed 's/.*"\(.*\)"/\1/')
+          VERSION=$(grep '#define VOLTMON_VERSION' include/config.h | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Building version $VERSION"
+          echo "VoltMon version: $VERSION"
+
+      - name: Extract Collector version from config.h
+        id: collector_version
+        run: |
+          VERSION=$(grep '#define COLLECTOR_VERSION' include/config.h | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Collector version: $VERSION"
 
       - name: Cache PlatformIO
         uses: actions/cache@v4
@@ -49,20 +56,29 @@ jobs:
           sed -i 's/"your_google_script_url"/"placeholder"/' include/secrets.h
           sed -i 's/"phonenumber@carrier_gateway.com"/"placeholder"/' include/secrets.h
 
-      - name: Build firmware
+      - name: Build VoltMon firmware
         run: platformio run -e esp32-c3-devkitm-1
 
-      - name: Copy firmware to release folder
+      - name: Build Collector firmware
+        run: platformio run -e voltmon-collector
+
+      - name: Copy firmware to release folders
         run: |
-          mkdir -p firmware
+          mkdir -p firmware/voltmon
+          mkdir -p firmware/collector
+          cp .pio/build/esp32-c3-devkitm-1/firmware.bin firmware/voltmon/firmware.bin
+          echo "${{ steps.voltmon_version.outputs.version }}" > firmware/voltmon/version.txt
           cp .pio/build/esp32-c3-devkitm-1/firmware.bin firmware/firmware.bin
-          echo "${{ steps.version.outputs.version }}" > firmware/version.txt
+          echo "${{ steps.voltmon_version.outputs.version }}" > firmware/version.txt
+          cp .pio/build/voltmon-collector/firmware.bin firmware/collector/firmware.bin
+          echo "${{ steps.collector_version.outputs.version }}" > firmware/collector/version.txt
 
       - name: Commit firmware files
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/jktightwad/esp32-Parasitic-Drain-Monitor.git
-          git add firmware/firmware.bin firmware/version.txt
-          git diff --staged --quiet || git commit -m "firmware: build ${{ steps.version.outputs.version }}"
+          git add firmware/voltmon/firmware.bin firmware/voltmon/version.txt
+          git add firmware/collector/firmware.bin firmware/collector/version.txt
+          git diff --staged --quiet || git commit -m "firmware: voltmon=${{ steps.voltmon_version.outputs.version }} collector=${{ steps.collector_version.outputs.version }}"
           git push

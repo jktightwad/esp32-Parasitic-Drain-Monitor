@@ -21,6 +21,8 @@ struct DeviceConfig {
   char aioUsername[MAX_AIO_LEN]    = "";
   char aioKey[MAX_AIO_LEN]         = "";
   bool configured                  = false;
+  bool debugMode                   = false;
+  int  sleepSeconds                = 300;
 };
 
 // ===== WIFI CREDENTIAL ENTRY =====
@@ -51,7 +53,9 @@ bool loadConfig(DeviceConfig& cfg) {
   strlcpy(cfg.deviceName,  doc["deviceName"]  | "", sizeof(cfg.deviceName));
   strlcpy(cfg.aioUsername, doc["aioUsername"] | "", sizeof(cfg.aioUsername));
   strlcpy(cfg.aioKey,      doc["aioKey"]      | "", sizeof(cfg.aioKey));
-  cfg.configured = doc["configured"] | false;
+  cfg.configured   = doc["configured"]   | false;
+  cfg.debugMode    = doc["debugMode"]    | false;
+  cfg.sleepSeconds = doc["sleepSeconds"] | 300;
 
   return true;
 }
@@ -66,6 +70,8 @@ bool saveConfig(const DeviceConfig& cfg) {
   doc["aioUsername"] = cfg.aioUsername;
   doc["aioKey"]      = cfg.aioKey;
   doc["configured"]  = cfg.configured;
+  doc["debugMode"]   = cfg.debugMode;
+  doc["sleepSeconds"] = cfg.sleepSeconds;
 
   serializeJson(doc, f);
   f.close();
@@ -159,7 +165,9 @@ void seedFromSecrets(DeviceConfig& cfg, WiFiCredentials& creds) {
   strlcpy(cfg.deviceName,  DEVICE_NAME,  sizeof(cfg.deviceName));
   strlcpy(cfg.aioUsername, AIO_USERNAME, sizeof(cfg.aioUsername));
   strlcpy(cfg.aioKey,      AIO_KEY,      sizeof(cfg.aioKey));
-  cfg.configured = true;
+  cfg.configured   = true;
+  cfg.debugMode    = false;
+  cfg.sleepSeconds = 300;
   saveConfig(cfg);
 
   Serial.println("Seeded config from secrets.h");
