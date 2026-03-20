@@ -243,7 +243,7 @@ bool connectMQTT() {
 void bufferRecords(const String& deviceId, const String& records) {
   // Parse pipe-delimited records and prefix each with device ID
   // Format stored: deviceId,timestamp,truckV,battV,charging
-  File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a");
+  File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a", true);  // true = create if not exists
   if (!f) {
     Serial.println("ERROR: Cannot open collector pending");
     return;
