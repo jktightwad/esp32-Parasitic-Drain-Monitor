@@ -6,7 +6,7 @@
 #define VOLTMON_VERSION     "2.0.1"
 
 // ===== COLLECTOR VERSION =====
-#define COLLECTOR_VERSION   "1.0.1"
+#define COLLECTOR_VERSION   "1.0.2"
 
 // ===== VOLTMON OTA =====
 #define VOLTMON_OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/voltmon/version.txt"
@@ -69,7 +69,7 @@
 // ===== TIMING — VoltMon =====
 #define SLEEP_SECONDS        30 //how many seconds to sleep
 #define UPLOAD_EVERY         3 //how many to store before posting
-const int CHARGE_CHECK_SECONDS = (SLEEP_SECONDS < 60) ? SLEEP_SECONDS : 60;
+static const int CHARGE_CHECK_SECONDS = (SLEEP_SECONDS < 60) ? SLEEP_SECONDS : 60;
 
 // ===== TIMING — Collector =====
 #define COLLECTOR_BLE_SCAN_SECONDS   10
@@ -86,7 +86,7 @@ const int CHARGE_CHECK_SECONDS = (SLEEP_SECONDS < 60) ? SLEEP_SECONDS : 60;
 #define FALLBACK_DEVICE_NAME  "2021AT4"
 
 // ===== TRUCK VOLTAGE CALIBRATION =====
-const float TRUCK_CAL_TABLE[][2] = {
+static const float TRUCK_CAL_TABLE[][2] = {
   {4.006,  4.0},
   {4.983,  5.0},
   {5.969,  6.0},
@@ -100,14 +100,14 @@ const float TRUCK_CAL_TABLE[][2] = {
   {14.289, 14.0},
   {15.417, 15.0}
 };
-const int TRUCK_CAL_TABLE_SIZE = 12;
+static const int TRUCK_CAL_TABLE_SIZE = 12;
 
 // ===== BATTERY VOLTAGE CALIBRATION =====
-const float BATT_CAL_TABLE[][2] = {
+static const float BATT_CAL_TABLE[][2] = {
   {3.469, 3.495},
   {4.140, 4.110}
 };
-const int BATT_CAL_TABLE_SIZE = 2;
+static const int BATT_CAL_TABLE_SIZE = 2;
 
 // ===== DEBUG MODE =====
 #define DEBUG_MODE           false

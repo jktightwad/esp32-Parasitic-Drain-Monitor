@@ -38,7 +38,7 @@ struct WiFiCredentials {
 };
 
 // ===== LOAD DEVICE CONFIG =====
-bool loadConfig(DeviceConfig& cfg) {
+inline bool loadConfig(DeviceConfig& cfg) {
   if (!LittleFS.exists(CONFIG_FILE)) return false;
 
   File f = LittleFS.open(CONFIG_FILE, "r");
@@ -61,7 +61,7 @@ bool loadConfig(DeviceConfig& cfg) {
 }
 
 // ===== SAVE DEVICE CONFIG =====
-bool saveConfig(const DeviceConfig& cfg) {
+inline bool saveConfig(const DeviceConfig& cfg) {
   File f = LittleFS.open(CONFIG_FILE, "w");
   if (!f) return false;
 
@@ -79,7 +79,7 @@ bool saveConfig(const DeviceConfig& cfg) {
 }
 
 // ===== LOAD WIFI CREDENTIALS =====
-bool loadWiFiCredentials(WiFiCredentials& creds) {
+inline bool loadWiFiCredentials(WiFiCredentials& creds) {
   creds.count = 0;
   if (!LittleFS.exists(WIFI_FILE)) return false;
 
@@ -104,7 +104,7 @@ bool loadWiFiCredentials(WiFiCredentials& creds) {
 }
 
 // ===== SAVE WIFI CREDENTIALS =====
-bool saveWiFiCredentials(const WiFiCredentials& creds) {
+inline bool saveWiFiCredentials(const WiFiCredentials& creds) {
   File f = LittleFS.open(WIFI_FILE, "w");
   if (!f) return false;
 
@@ -123,7 +123,7 @@ bool saveWiFiCredentials(const WiFiCredentials& creds) {
 }
 
 // ===== ADD WIFI NETWORK =====
-bool addWiFiNetwork(WiFiCredentials& creds, const char* ssid, const char* pass) {
+inline bool addWiFiNetwork(WiFiCredentials& creds, const char* ssid, const char* pass) {
   if (creds.count >= MAX_WIFI_NETWORKS) return false;
 
   for (int i = 0; i < creds.count; i++) {
@@ -140,7 +140,7 @@ bool addWiFiNetwork(WiFiCredentials& creds, const char* ssid, const char* pass) 
 }
 
 // ===== REMOVE WIFI NETWORK BY INDEX =====
-bool removeWiFiNetwork(WiFiCredentials& creds, int index) {
+inline bool removeWiFiNetwork(WiFiCredentials& creds, int index) {
   if (index < 0 || index >= creds.count) return false;
 
   for (int i = index; i < creds.count - 1; i++) {
@@ -152,7 +152,7 @@ bool removeWiFiNetwork(WiFiCredentials& creds, int index) {
 
 // ===== SEED FROM SECRETS (first flash only) =====
 #ifdef SEED_FROM_SECRETS
-void seedFromSecrets(DeviceConfig& cfg, WiFiCredentials& creds) {
+inline void seedFromSecrets(DeviceConfig& cfg, WiFiCredentials& creds) {
   if (cfg.configured) return;
 
   for (int i = 0; i < WIFI_COUNT && i < MAX_WIFI_NETWORKS; i++) {

@@ -567,6 +567,8 @@ void checkAndApplyOTA() {
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
+  Serial.println("LittleFS total: " + String(LittleFS.totalBytes()));
+  Serial.println("LittleFS used: "  + String(LittleFS.usedBytes()));
   esp_task_wdt_init(120, false);
   delay(2000);
 

@@ -14,7 +14,9 @@
 #include "config.h"
 #include "storage.h"
 #include "portal.h"
-#include "ble_server.h"
+
+// Forward declaration — implemented in ble_transfer.cpp
+bool executeBLETransfer(DeviceConfig& cfg, bool hasRecords);
 
 // ===== GLOBAL STATE =====
 DeviceConfig    deviceConfig;
@@ -23,13 +25,12 @@ WiFiCredentials wifiCreds;
 int  recordCount     = 0;
 bool ntpSynced       = false;
 int  wakeCount       = 0;
+int  failedScanCount = 0;
 int  bleFailCount    = 0;
-long lastWiFiAttempt = 0;
 
 esp_adc_cal_characteristics_t adc_chars;
 RTC_DS3231 rtc;
 
-// MQTT — used only during WiFi fallback
 WiFiClient           mqttWifiClient;
 Adafruit_MQTT_Client mqtt(&mqttWifiClient, AIO_SERVER, AIO_PORT, "", "");
 char TOPIC_TRUCK[80];
@@ -169,15 +170,16 @@ void loadState() {
       wakeCount = line.substring(10).toInt();
     else if (line.startsWith("ntpSynced="))
       ntpSynced = line.substring(10).toInt() == 1;
+    else if (line.startsWith("failedScanCount="))
+      failedScanCount = line.substring(16).toInt();
     else if (line.startsWith("bleFailCount="))
       bleFailCount = line.substring(13).toInt();
-    else if (line.startsWith("lastWiFiAttempt="))
-      lastWiFiAttempt = line.substring(16).toInt();
   }
   f.close();
 
   debugLog("State loaded — wakes=" + String(wakeCount) +
            " records=" + String(recordCount) +
+           " failedScans=" + String(failedScanCount) +
            " bleFailCount=" + String(bleFailCount));
 }
 
@@ -192,8 +194,8 @@ void saveState() {
   f.println("recordCount="     + String(recordCount));
   f.println("wakeCount="       + String(wakeCount));
   f.println("ntpSynced="       + String(ntpSynced ? 1 : 0));
+  f.println("failedScanCount=" + String(failedScanCount));
   f.println("bleFailCount="    + String(bleFailCount));
-  f.println("lastWiFiAttempt=" + String(lastWiFiAttempt));
   f.close();
 }
 
@@ -324,6 +326,12 @@ void writePending(DateTime now, float truckVolts, float battVolts, bool charging
     }
   }
 
+  // Create file if it doesn't exist
+  if (!LittleFS.exists(PENDING_FILE)) {
+    File init = LittleFS.open(PENDING_FILE, "w");
+    if (init) init.close();
+  }
+
   File f;
   int retries = 0;
   while (retries < 3) {
@@ -334,7 +342,7 @@ void writePending(DateTime now, float truckVolts, float battVolts, bool charging
     retries++;
   }
   if (!f) {
-    debugLog("ERROR: Could not open pending file");
+    debugLog("ERROR: Could not open pending file after retries");
     return;
   }
 
@@ -378,31 +386,25 @@ bool hasPendingRecords() {
   return hasContent;
 }
 
-// ===== WIFI CONNECT (fallback only) =====
-bool connectWiFi() {
-  if (wifiCreds.count == 0) {
-    debugLog("No WiFi credentials");
-    return false;
-  }
-
-  debugLog("WiFi fallback attempt...");
-  WiFi.persistent(false);
-  WiFi.setAutoReconnect(false);
-  WiFi.mode(portalActive ? WIFI_AP_STA : WIFI_STA);
-  delay(500);
+// ===== WIFI SCAN =====
+int scanForKnownNetworks(int* visibleIndices, int* visibleRSSI,
+                          uint8_t visibleBSSID[][6], int* visibleChannels) {
+  debugLog("Scanning for known networks...");
 
   int found = WiFi.scanNetworks();
-  debugLog("WiFi scan: " + String(found) + " networks");
+
+  if (found <= 0) {
+    debugLog("No networks found");
+    WiFi.scanDelete();
+    return 0;
+  }
+
+  debugLog("Networks found: " + String(found));
 
   int     bestRSSI[MAX_WIFI_NETWORKS];
   bool    seen[MAX_WIFI_NETWORKS];
   uint8_t bestBSSID[MAX_WIFI_NETWORKS][6];
   int     bestChannel[MAX_WIFI_NETWORKS];
-  int     visibleIndices[MAX_WIFI_NETWORKS];
-  int     visibleRSSI[MAX_WIFI_NETWORKS];
-  uint8_t visibleBSSID[MAX_WIFI_NETWORKS][6];
-  int     visibleChannels[MAX_WIFI_NETWORKS];
-  int     visibleCount = 0;
 
   for (int i = 0; i < wifiCreds.count; i++) {
     bestRSSI[i] = -999;
@@ -413,27 +415,36 @@ bool connectWiFi() {
     String scannedSSID = WiFi.SSID(i);
     int    scannedRSSI = WiFi.RSSI(i);
     int    scannedCh   = WiFi.channel(i);
+    debugLog("  " + scannedSSID + " (" + String(scannedRSSI) + " dBm) ch" + String(scannedCh));
+
     for (int n = 0; n < wifiCreds.count; n++) {
-      if (scannedSSID == wifiCreds.networks[n].ssid && scannedRSSI > bestRSSI[n]) {
-        bestRSSI[n]    = scannedRSSI;
-        bestChannel[n] = scannedCh;
-        memcpy(bestBSSID[n], WiFi.BSSID(i), 6);
-        seen[n] = true;
+      if (scannedSSID == wifiCreds.networks[n].ssid) {
+        if (scannedRSSI > bestRSSI[n]) {
+          bestRSSI[n]    = scannedRSSI;
+          bestChannel[n] = scannedCh;
+          memcpy(bestBSSID[n], WiFi.BSSID(i), 6);
+          seen[n] = true;
+        }
       }
     }
   }
+
   WiFi.scanDelete();
 
+  int visibleCount = 0;
   for (int n = 0; n < wifiCreds.count; n++) {
     if (!seen[n]) continue;
+
     int pos = visibleCount;
-    while (pos > 0 && visibleRSSI[pos-1] < bestRSSI[n]) pos--;
+    while (pos > 0 && visibleRSSI[pos - 1] < bestRSSI[n]) pos--;
+
     for (int j = visibleCount; j > pos; j--) {
-      visibleIndices[j]  = visibleIndices[j-1];
-      visibleRSSI[j]     = visibleRSSI[j-1];
-      visibleChannels[j] = visibleChannels[j-1];
-      memcpy(visibleBSSID[j], visibleBSSID[j-1], 6);
+      visibleIndices[j]  = visibleIndices[j - 1];
+      visibleRSSI[j]     = visibleRSSI[j - 1];
+      visibleChannels[j] = visibleChannels[j - 1];
+      memcpy(visibleBSSID[j], visibleBSSID[j - 1], 6);
     }
+
     visibleIndices[pos]  = n;
     visibleRSSI[pos]     = bestRSSI[n];
     visibleChannels[pos] = bestChannel[n];
@@ -441,8 +452,43 @@ bool connectWiFi() {
     visibleCount++;
   }
 
+  if (visibleCount > 0) {
+    debugLog("Visible known: " + String(visibleCount) +
+             " — best: " + String(wifiCreds.networks[visibleIndices[0]].ssid) +
+             " (" + String(visibleRSSI[0]) + " dBm)");
+  } else {
+    debugLog("No known networks in range");
+  }
+
+  return visibleCount;
+}
+
+// ===== WIFI CONNECT =====
+bool connectWiFi() {
+  if (wifiCreds.count == 0) {
+    debugLog("No WiFi credentials configured");
+    return false;
+  }
+
+  debugLog("Connecting to WiFi...");
+
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
+  WiFi.mode(portalActive ? WIFI_AP_STA : WIFI_STA);
+  delay(500);
+
+  int     visibleIndices[MAX_WIFI_NETWORKS];
+  int     visibleRSSI[MAX_WIFI_NETWORKS];
+  uint8_t visibleBSSID[MAX_WIFI_NETWORKS][6];
+  int     visibleChannels[MAX_WIFI_NETWORKS];
+
+  int visibleCount = scanForKnownNetworks(visibleIndices, visibleRSSI,
+                                           visibleBSSID, visibleChannels);
+
   if (visibleCount == 0) {
-    debugLog("No known WiFi in range");
+    failedScanCount++;
+    saveState();
+    debugLog("No known networks in range — failedScans=" + String(failedScanCount));
     return false;
   }
 
@@ -455,32 +501,41 @@ bool connectWiFi() {
     delay(1000);
   }
 
-  // Single attempt per network — fallback only
   for (int i = 0; i < visibleCount; i++) {
-    int netIdx = visibleIndices[i];
-    debugLog("WiFi trying: " + wifiCreds.networks[netIdx].ssid);
+    int         netIdx = visibleIndices[i];
+    const char* ssid   = wifiCreds.networks[netIdx].ssid.c_str();
+    const char* pass   = wifiCreds.networks[netIdx].pass.c_str();
 
-    WiFi.begin(wifiCreds.networks[netIdx].ssid.c_str(),
-               wifiCreds.networks[netIdx].pass.c_str());
+    for (int attempt = 1; attempt <= WIFI_ATTEMPTS_PER_NETWORK; attempt++) {
+      debugLog("Trying [" + String(ssid) + "] attempt " +
+               String(attempt) + "/" + String(WIFI_ATTEMPTS_PER_NETWORK));
 
-    int dots = 0;
-    while (WiFi.status() != WL_CONNECTED && dots < 20) {
-      delay(500);
-      feedWatchdog();
-      dots++;
+      WiFi.begin(ssid, pass);
+
+      int dots = 0;
+      while (WiFi.status() != WL_CONNECTED && dots < 20) {
+        delay(500);
+        feedWatchdog();
+        dots++;
+      }
+
+      if (WiFi.status() == WL_CONNECTED) {
+        debugLog("Connected: " + WiFi.localIP().toString() +
+                 " RSSI:" + String(WiFi.RSSI()));
+        failedScanCount = 0;
+        saveState();
+        return true;
+      }
+
+      debugLog("Failed — status: " + String(WiFi.status()));
+      WiFi.disconnect(false);
+      if (attempt < WIFI_ATTEMPTS_PER_NETWORK) delay(1000);
     }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      debugLog("WiFi connected: " + WiFi.localIP().toString() +
-               " RSSI:" + String(WiFi.RSSI()));
-      return true;
-    }
-
-    WiFi.disconnect(false);
-    delay(500);
   }
 
-  debugLog("WiFi fallback failed");
+  failedScanCount++;
+  saveState();
+  debugLog("All networks failed — failedScans=" + String(failedScanCount));
   return false;
 }
 
@@ -551,12 +606,12 @@ void publishLatestReading(float truckVolts, float battVolts) {
   debugLog(ok1 ? "MQTT truck: " + String(truckVolts, 3) + "V" : "MQTT truck failed");
   debugLog(ok2 ? "MQTT batt: "  + String(battVolts, 3)  + "V" : "MQTT batt failed");
 
-  if (deviceConfig.debugMode && feedDebug) {
+  if (feedDebug) {
     String msg = "v:" + String(VOLTMON_VERSION) +
-             " WiFi_FALLBACK RSSI:" + String(WiFi.RSSI()) +
-             " Truck:" + String(truckVolts, 3) +
-             " Batt:" + String(battVolts, 3) +
-             " BLEFails:" + String(bleFailCount);
+                 " RSSI:" + String(WiFi.RSSI()) +
+                 " Truck:" + String(truckVolts, 3) +
+                 " Batt:" + String(battVolts, 3) +
+                 " BLEFails:" + String(bleFailCount);
     feedDebug->publish(msg.c_str());
   }
 
@@ -591,15 +646,15 @@ bool sendToGoogleSheets(String compactData) {
   return response.indexOf("\"ok\"") >= 0;
 }
 
-// ===== UPLOAD PENDING VIA WIFI =====
-void uploadPendingViaWiFi() {
+// ===== UPLOAD PENDING =====
+void uploadPending() {
   if (!fsReady || !LittleFS.exists(PENDING_FILE)) {
-    debugLog("No pending records");
+    debugLog("No pending records to upload");
     return;
   }
 
   File f = LittleFS.open(PENDING_FILE, "r");
-  if (!f) return;
+  if (!f) { debugLog("ERROR: Cannot open pending"); return; }
 
   String lines[MAX_PENDING_RECORDS];
   int totalCount = 0;
@@ -617,8 +672,8 @@ void uploadPendingViaWiFi() {
   }
   f.close();
 
-  if (totalCount == 0) return;
-  debugLog("WiFi upload: " + String(totalCount) + " records");
+  if (totalCount == 0) { debugLog("No valid records"); return; }
+  debugLog("Uploading " + String(totalCount) + " records");
 
   const int BATCH_SIZE = 40;
   int sent = 0;
@@ -644,7 +699,7 @@ void uploadPendingViaWiFi() {
     }
 
     if (!sendToGoogleSheets(compact)) {
-      debugLog("WiFi upload batch failed");
+      debugLog("Batch failed — keeping for retry");
       return;
     }
 
@@ -654,11 +709,11 @@ void uploadPendingViaWiFi() {
   }
 
   LittleFS.remove(PENDING_FILE);
-  debugLog("WiFi upload complete");
+  debugLog("Upload complete");
 }
 
-// ===== OTA VIA WIFI =====
-void checkAndApplyOTAWiFi() {
+// ===== OTA =====
+void checkAndApplyOTA() {
   debugLog("Checking OTA...");
 
   WiFiClientSecure secureClient;
@@ -746,58 +801,22 @@ void checkAndApplyOTAWiFi() {
   }
 
   debugLog("OTA success — rebooting into " + remoteVersion);
+
+  if (connectMQTT()) {
+    String status = "OTA_OK_" + remoteVersion;
+    feedDebug->publish(status.c_str());
+    mqtt.disconnect();
+  }
+
   Serial.flush();
   delay(500);
   ESP.restart();
 }
 
-// ===== WIFI FALLBACK CYCLE =====
-// Full cycle: upload pending + publish MQTT + OTA check
-void doWiFiFallback(float truckVolts, float battVolts) {
-  debugLog("WiFi fallback triggered — bleFailCount=" + String(bleFailCount));
-
-  if (!connectWiFi()) {
-    debugLog("WiFi fallback: no network available");
-    if (portalActive) return;  // portal already running
-    // Start portal if truck is running
-    WiFi.mode(WIFI_AP_STA);
-    delay(200);
-    startPortal(deviceConfig, wifiCreds);
-    return;
-  }
-
-  if (!ntpSynced) {
-    if (syncNTP()) { ntpSynced = true; saveState(); }
-  }
-
-  uploadPendingViaWiFi();
-  publishLatestReading(truckVolts, battVolts);
-  checkAndApplyOTAWiFi();
-  disconnectWiFi();
-
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    lastWiFiAttempt = mktime(&timeinfo);
-  }
-  bleFailCount = 0;
-  saveState();
-
-  if (portalActive) stopPortal();
-}
-
-// ===== SHOULD TRY WIFI FALLBACK =====
-bool shouldTryWiFi(bool truckRunning) {
-  if (truckRunning) return true;        // always try when running
-  if (bleFailCount >= 12) return true;  // once per hour when parked
-  return false;
-}
-
 // ===== BLE TRANSFER =====
 bool doBLETransfer() {
   debugLog("BLE: attempting transfer...");
-  bleServerInit(deviceConfig);
-  bool ok = bleScanAndTransfer(deviceConfig, hasPendingRecords());
-  bleServerStop();
+  bool ok = executeBLETransfer(deviceConfig, hasPendingRecords());
 
   if (ok) {
     LittleFS.remove(PENDING_FILE);
@@ -814,10 +833,69 @@ bool doBLETransfer() {
   return ok;
 }
 
+// ===== SHOULD TRY WIFI =====
+// WiFi when: truck running, OR BLE has failed 12+ consecutive wakes (parked ~1hr at 30s sleep)
+bool shouldTryWiFi(bool truckRunning) {
+  if (truckRunning) return true;
+  if (bleFailCount >= UPLOAD_EVERY) return true;
+  return false;
+}
+
+// ===== UPLOAD CYCLE (WiFi) =====
+bool doUploadCycle(float truckVolts, float battVolts) {
+  debugLog("WiFi upload cycle — " + String(recordCount) + " records");
+
+  if (!connectWiFi()) {
+    debugLog("WiFi unavailable — retry next cycle");
+    return false;
+  }
+
+  if (!ntpSynced) {
+    if (syncNTP()) { ntpSynced = true; saveState(); }
+  }
+
+  uploadPending();
+  publishLatestReading(truckVolts, battVolts);
+  checkAndApplyOTA();
+  disconnectWiFi();
+
+  failedScanCount = 0;
+  bleFailCount    = 0;
+  saveState();
+  return true;
+}
+
+// ===== HANDLE PORTAL UPDATES =====
+bool handlePortalUpdates(float truckVolts, float battVolts) {
+  if (!credsUpdated && !configUpdated) return false;
+
+  credsUpdated  = false;
+  configUpdated = false;
+  loadConfig(deviceConfig);
+  loadWiFiCredentials(wifiCreds);
+  setupMQTT();
+  debugLog("Credentials updated via portal — retrying WiFi");
+
+  if (connectWiFi()) {
+    stopPortal();
+    if (!ntpSynced && syncNTP()) { ntpSynced = true; saveState(); }
+    uploadPending();
+    publishLatestReading(truckVolts, battVolts);
+    checkAndApplyOTA();
+    disconnectWiFi();
+    failedScanCount = 0;
+    bleFailCount    = 0;
+    saveState();
+    return true;
+  }
+
+  debugLog("New credentials failed — portal remains open");
+  return false;
+}
+
 // ===== GOTO SLEEP =====
 void goToSleep() {
   if (portalActive) stopPortal();
-  bleServerStop();
   digitalWrite(PIN_CHARGE_MOSFET, LOW);
 
   int sleepSecs = (deviceConfig.sleepSeconds > 0) ?
@@ -887,18 +965,15 @@ void setup() {
     Serial.println("LittleFS OK");
   }
 
-  // Load config and credentials
   loadConfig(deviceConfig);
   loadWiFiCredentials(wifiCreds);
 
-  // Seed from secrets.h on first flash (owner device only)
 #ifdef SEED_FROM_SECRETS
   if (!deviceConfig.configured) {
     seedFromSecrets(deviceConfig, wifiCreds);
   }
 #endif
 
-  // Migration — populate LittleFS from compiled fallbacks if empty
   if (strlen(deviceConfig.deviceName) == 0) {
     debugLog("Migration: applying fallback config");
     strlcpy(deviceConfig.deviceName,  FALLBACK_DEVICE_NAME, sizeof(deviceConfig.deviceName));
@@ -923,54 +998,28 @@ void setup() {
   }
 
   loadState();
-  setupMQTT();
 
   DateTime rtcCheck = rtc.now();
   if (rtcCheck.year() < 2020) {
-    debugLog("RTC invalid — will sync on next WiFi connection");
+    debugLog("RTC invalid — will sync on next connection");
     ntpSynced = false;
     saveState();
   }
+
+  setupMQTT();
 
   wakeCount++;
   saveState();
 
   debugLog("=== Wake #" + String(wakeCount) +
            " [" + String(deviceConfig.deviceName) + "] v" + String(VOLTMON_VERSION) +
-           " reset=" + String((int)reason) +
-           (deviceConfig.debugMode ? " DEBUG" : "") + " ===");
+           " reset=" + String((int)reason) + " ===");
 
   if (wakeCount == 1) {
     dumpDebugLog();
     dumpPendingFile();
   }
 
-  // ===== NOT CONFIGURED — start portal =====
-  if (!deviceConfig.configured) {
-    debugLog("Not configured — starting portal");
-    WiFi.mode(WIFI_AP_STA);
-    delay(200);
-    startPortal(deviceConfig, wifiCreds);
-
-    while (!deviceConfig.configured) {
-      portalLoop();
-      if (credsUpdated || configUpdated) {
-        credsUpdated  = false;
-        configUpdated = false;
-        loadConfig(deviceConfig);
-        loadWiFiCredentials(wifiCreds);
-        setupMQTT();
-        if (deviceConfig.configured) {
-          stopPortal();
-          break;
-        }
-      }
-      delay(500);
-      feedWatchdog();
-    }
-  }
-
-  // Read voltages
   DateTime now      = rtc.now();
   float rawTruck    = readVoltage(PIN_TRUCK_SOURCE, PIN_TRUCK_ADC, TRUCK_DIVIDER_RATIO);
   float truckVolts  = applyTruckCalibration(rawTruck);
@@ -984,81 +1033,122 @@ void setup() {
            "V | Running: " + (truckRunning ? "YES" : "NO") +
            " | Charging: " + (charging ? "YES" : "NO"));
 
-  // Write reading
+  // ===== NOT CONFIGURED — start portal =====
+  if (!deviceConfig.configured) {
+    debugLog("Not configured — starting setup portal");
+    WiFi.mode(WIFI_AP_STA);
+    delay(200);
+    startPortal(deviceConfig, wifiCreds);
+
+    while (!deviceConfig.configured) {
+      portalLoop();
+      if (credsUpdated || configUpdated) {
+        handlePortalUpdates(truckVolts, battVolts);
+        if (deviceConfig.configured) break;
+      }
+      delay(500);
+      feedWatchdog();
+    }
+
+    rawTruck     = readVoltage(PIN_TRUCK_SOURCE, PIN_TRUCK_ADC, TRUCK_DIVIDER_RATIO);
+    truckVolts   = applyTruckCalibration(rawTruck);
+    battVolts    = readBattVoltage();
+    truckRunning = (truckVolts > VOLTAGE_RUNNING);
+    charging     = truckRunning && (battVolts < BATT_START_CHARGE);
+  }
+
+  // ===== NORMAL OPERATION =====
+  digitalWrite(PIN_CHARGE_MOSFET, charging ? HIGH : LOW);
   writePending(now, truckVolts, battVolts, charging);
   recordCount++;
   saveState();
+  debugLog("record " + String(recordCount) + "/" + String(UPLOAD_EVERY));
 
-  // ===== BLE TRANSFER ATTEMPT =====
-  bool bleSuccess = false;
-  if (hasPendingRecords()) {
-    bleSuccess = doBLETransfer();
-  }
-
-  // ===== WIFI FALLBACK =====
-  if (!bleSuccess && shouldTryWiFi(truckRunning)) {
-    doWiFiFallback(truckVolts, battVolts);
+  // ===== UPLOAD CHECK =====
+  if (recordCount >= UPLOAD_EVERY) {
+    bool uploaded = doBLETransfer();
+    if (!uploaded && shouldTryWiFi(truckRunning)) {
+      uploaded = doUploadCycle(truckVolts, battVolts);
+    }
+    if (uploaded) { recordCount = 0; saveState(); }
   }
 
   // ===== TRUCK RUNNING LOOP =====
-  if (truckRunning) {
-    digitalWrite(PIN_CHARGE_MOSFET, charging ? HIGH : LOW);
+  while (truckRunning) {
+    debugLog("Running | Charging: " + String(charging ? "YES" : "NO") +
+             " | Truck: " + String(truckVolts, 3) +
+             "V | Batt: " + String(battVolts, 3) + "V");
 
-    while (truckRunning) {
-      portalLoop();
+    portalLoop();
 
-      // Check portal updates
-      if (portalActive && (credsUpdated || configUpdated)) {
-        credsUpdated  = false;
-        configUpdated = false;
-        loadConfig(deviceConfig);
-        loadWiFiCredentials(wifiCreds);
-        setupMQTT();
-        if (connectWiFi()) {
-          stopPortal();
-          if (!ntpSynced && syncNTP()) { ntpSynced = true; saveState(); }
-          uploadPendingViaWiFi();
-          disconnectWiFi();
-          bleFailCount = 0;
-          saveState();
-        }
-      }
-
-      for (int i = 0; i < CHARGE_CHECK_SECONDS; i++) {
-        delay(1000);
-        feedWatchdog();
-      }
-
-      rawTruck     = readVoltage(PIN_TRUCK_SOURCE, PIN_TRUCK_ADC, TRUCK_DIVIDER_RATIO);
-      truckVolts   = applyTruckCalibration(rawTruck);
-      battVolts    = readBattVoltage();
-      truckRunning = (truckVolts > VOLTAGE_RUNNING);
-
-      if (charging && battVolts > BATT_STOP_CHARGE) {
-        charging = false;
-        debugLog("Charging stopped — " + String(battVolts, 3) + "V");
-      } else if (!charging && truckRunning && battVolts < BATT_START_CHARGE) {
-        charging = true;
-        debugLog("Charging started — " + String(battVolts, 3) + "V");
-      }
-
-      digitalWrite(PIN_CHARGE_MOSFET, charging ? HIGH : LOW);
-      writePending(rtc.now(), truckVolts, battVolts, charging);
-      recordCount++;
-      saveState();
-
-      if (recordCount >= UPLOAD_EVERY) {
-        bool ok = doBLETransfer();
-        if (!ok) {
-          doWiFiFallback(truckVolts, battVolts);
-        } else {
-          recordCount = 0;
-          saveState();
-        }
-      }
+    if (portalActive) {
+      handlePortalUpdates(truckVolts, battVolts);
     }
 
-    debugLog("Truck stopped");
+    for (int i = 0; i < CHARGE_CHECK_SECONDS; i++) {
+      delay(1000);
+      feedWatchdog();
+    }
+
+    rawTruck     = readVoltage(PIN_TRUCK_SOURCE, PIN_TRUCK_ADC, TRUCK_DIVIDER_RATIO);
+    truckVolts   = applyTruckCalibration(rawTruck);
+    battVolts    = readBattVoltage();
+    truckRunning = (truckVolts > VOLTAGE_RUNNING);
+
+    if (charging && battVolts > BATT_STOP_CHARGE) {
+      charging = false;
+      debugLog("Charging stopped — " + String(battVolts, 3) + "V");
+    } else if (!charging && truckRunning && battVolts < BATT_START_CHARGE) {
+      charging = true;
+      debugLog("Charging started — " + String(battVolts, 3) + "V");
+    }
+
+    digitalWrite(PIN_CHARGE_MOSFET, charging ? HIGH : LOW);
+    writePending(rtc.now(), truckVolts, battVolts, charging);
+    recordCount++;
+    saveState();
+
+    if (recordCount >= UPLOAD_EVERY) {
+      bool uploaded = doBLETransfer();
+      if (!uploaded) {
+        bool wifiOk = false;
+        if (portalActive) {
+          if (connectWiFi()) {
+            stopPortal();
+            if (!ntpSynced && syncNTP()) { ntpSynced = true; saveState(); }
+            uploadPending();
+            publishLatestReading(truckVolts, battVolts);
+            checkAndApplyOTA();
+            disconnectWiFi();
+            failedScanCount = 0;
+            bleFailCount    = 0;
+            saveState();
+            wifiOk = true;
+          }
+        } else {
+          wifiOk = doUploadCycle(truckVolts, battVolts);
+          if (!wifiOk) {
+            debugLog("Upload failed — starting portal");
+            WiFi.mode(WIFI_AP_STA);
+            delay(200);
+            startPortal(deviceConfig, wifiCreds);
+          }
+        }
+        if (wifiOk) { recordCount = 0; saveState(); }
+      }
+    }
+  }
+
+  debugLog("Truck stopped");
+
+  if (recordCount >= UPLOAD_EVERY) {
+    bool uploaded = doBLETransfer();
+    if (!uploaded && shouldTryWiFi(false)) {
+      if (doUploadCycle(truckVolts, battVolts)) {
+        recordCount = 0;
+        saveState();
+      }
+    }
   }
 
   goToSleep();

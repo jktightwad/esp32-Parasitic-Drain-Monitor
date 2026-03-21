@@ -7,17 +7,16 @@
 #include "storage.h"
 
 // ===== PORTAL STATE =====
-static AsyncWebServer portalServer(80);
-static DNSServer      dnsServer;
-static bool           portalActive    = false;
-static volatile bool  credsUpdated    = false;
-static volatile bool  configUpdated   = false;
+static AsyncWebServer  portalServer(80);
+static DNSServer*      dnsServer    = nullptr;
+static bool            portalActive  = false;
+static volatile bool   credsUpdated  = false;
+static volatile bool   configUpdated = false;
 
-// ===== DNS PROCESS =====
-// Call this from loop() whenever portal is active
+// ===== PORTAL LOOP =====
 void portalLoop() {
-  if (portalActive) {
-    dnsServer.processNextRequest();
+  if (portalActive && dnsServer) {
+    dnsServer->processNextRequest();
   }
 }
 
@@ -49,8 +48,6 @@ static const char PORTAL_HTML[] PROGMEM = R"rawhtml(
       border-radius: 6px; font-size: 1em; cursor: pointer;
     }
     button:active { background: #1558b0; }
-    button.danger { background: #d93025; }
-    button.danger:active { background: #a50e0e; }
     .net-item {
       display: flex; justify-content: space-between; align-items: center;
       padding: 8px 0; border-bottom: 1px solid #eee; font-size: 0.95em;
@@ -187,6 +184,8 @@ static String buildPage(const DeviceConfig& cfg, const WiFiCredentials& creds,
 void startPortal(DeviceConfig& cfg, WiFiCredentials& creds) {
   if (portalActive) return;
 
+  if (!dnsServer) dnsServer = new DNSServer();
+
   String apName = (strlen(cfg.deviceName) > 0)
     ? "VoltMon-" + String(cfg.deviceName)
     : "VoltMon-Initialize";
@@ -194,34 +193,22 @@ void startPortal(DeviceConfig& cfg, WiFiCredentials& creds) {
   WiFi.softAP(apName.c_str(), "voltmon1");
   delay(200);
 
-  // Start DNS server — redirects all domains to our IP (captive portal)
-  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
-  dnsServer.start(53, "*", WiFi.softAPIP());
+  dnsServer->setErrorReplyCode(DNSReplyCode::NoError);
+  dnsServer->start(53, "*", WiFi.softAPIP());
 
   Serial.println("Portal AP: " + apName);
   Serial.println("IP: " + WiFi.softAPIP().toString());
 
-  // ===== ROUTES =====
-
-  // Root + captive portal detection endpoints
-  auto servePage = [&cfg, &creds](AsyncWebServerRequest* req) {
+  portalServer.on("/", HTTP_GET, [&cfg, &creds](AsyncWebServerRequest* req) {
     req->send(200, "text/html", buildPage(cfg, creds));
-  };
+  });
 
-  portalServer.on("/", HTTP_GET, servePage);
+  portalServer.on("/hotspot-detect.html",       HTTP_GET, [&cfg, &creds](AsyncWebServerRequest* req) { req->send(200, "text/html", buildPage(cfg, creds)); });
+  portalServer.on("/library/test/success.html", HTTP_GET, [&cfg, &creds](AsyncWebServerRequest* req) { req->send(200, "text/html", buildPage(cfg, creds)); });
+  portalServer.on("/generate_204",              HTTP_GET, [&cfg, &creds](AsyncWebServerRequest* req) { req->send(200, "text/html", buildPage(cfg, creds)); });
+  portalServer.on("/connecttest.txt",           HTTP_GET, [&cfg, &creds](AsyncWebServerRequest* req) { req->send(200, "text/html", buildPage(cfg, creds)); });
+  portalServer.on("/ncsi.txt",                  HTTP_GET, [&cfg, &creds](AsyncWebServerRequest* req) { req->send(200, "text/html", buildPage(cfg, creds)); });
 
-  // Apple captive portal detection
-  portalServer.on("/hotspot-detect.html",       HTTP_GET, servePage);
-  portalServer.on("/library/test/success.html", HTTP_GET, servePage);
-
-  // Android/Windows captive portal detection
-  portalServer.on("/generate_204",              HTTP_GET, servePage);
-  portalServer.on("/connecttest.txt",           HTTP_GET, servePage);
-  portalServer.on("/ncsi.txt",                  HTTP_GET, servePage);
-  portalServer.on("/redirect",                  HTTP_GET, servePage);
-  portalServer.on("/canonical.html",            HTTP_GET, servePage);
-
-  // First setup POST
   portalServer.on("/firstsetup", HTTP_POST, [&cfg, &creds](AsyncWebServerRequest* req) {
     String name    = req->hasParam("name",     true) ? req->getParam("name",     true)->value() : "";
     String ssid    = req->hasParam("ssid",     true) ? req->getParam("ssid",     true)->value() : "";
@@ -240,34 +227,27 @@ void startPortal(DeviceConfig& cfg, WiFiCredentials& creds) {
     cfg.configured = true;
     saveConfig(cfg);
     addWiFiNetwork(creds, ssid.c_str(), pass.c_str());
-
     credsUpdated  = true;
     configUpdated = true;
-
     req->send(200, "text/html", buildPage(cfg, creds, "Setup saved! Attempting to connect..."));
   });
 
-  // Add WiFi POST
   portalServer.on("/addwifi", HTTP_POST, [&cfg, &creds](AsyncWebServerRequest* req) {
     String ssid = req->hasParam("ssid", true) ? req->getParam("ssid", true)->value() : "";
     String pass = req->hasParam("pass", true) ? req->getParam("pass", true)->value() : "";
-
     if (ssid.length() == 0) {
       req->send(200, "text/html", buildPage(cfg, creds, "SSID cannot be empty.", true));
       return;
     }
-
     if (creds.count >= MAX_WIFI_NETWORKS) {
-      req->send(200, "text/html", buildPage(cfg, creds, "Maximum networks reached. Remove one first.", true));
+      req->send(200, "text/html", buildPage(cfg, creds, "Maximum networks reached.", true));
       return;
     }
-
     addWiFiNetwork(creds, ssid.c_str(), pass.c_str());
     credsUpdated = true;
     req->send(200, "text/html", buildPage(cfg, creds, "Network added. Attempting to connect..."));
   });
 
-  // Remove WiFi POST
   portalServer.on("/delwifi", HTTP_POST, [&cfg, &creds](AsyncWebServerRequest* req) {
     if (!req->hasParam("idx", true)) {
       req->send(200, "text/html", buildPage(cfg, creds, "Invalid request.", true));
@@ -278,11 +258,9 @@ void startPortal(DeviceConfig& cfg, WiFiCredentials& creds) {
     req->send(200, "text/html", buildPage(cfg, creds, "Network removed."));
   });
 
-  // Save AIO POST
   portalServer.on("/saveaio", HTTP_POST, [&cfg, &creds](AsyncWebServerRequest* req) {
     String aioUser = req->hasParam("aio_user", true) ? req->getParam("aio_user", true)->value() : "";
     String aioKey  = req->hasParam("aio_key",  true) ? req->getParam("aio_key",  true)->value() : "";
-
     strlcpy(cfg.aioUsername, aioUser.c_str(), sizeof(cfg.aioUsername));
     if (aioKey.length() > 0) {
       strlcpy(cfg.aioKey, aioKey.c_str(), sizeof(cfg.aioKey));
@@ -292,7 +270,6 @@ void startPortal(DeviceConfig& cfg, WiFiCredentials& creds) {
     req->send(200, "text/html", buildPage(cfg, creds, "Adafruit IO credentials saved."));
   });
 
-  // Save device name POST
   portalServer.on("/savename", HTTP_POST, [&cfg, &creds](AsyncWebServerRequest* req) {
     String name = req->hasParam("name", true) ? req->getParam("name", true)->value() : "";
     if (name.length() == 0) {
@@ -302,15 +279,11 @@ void startPortal(DeviceConfig& cfg, WiFiCredentials& creds) {
     strlcpy(cfg.deviceName, name.c_str(), sizeof(cfg.deviceName));
     saveConfig(cfg);
     configUpdated = true;
-
-    // Update AP name to reflect new device name
-    String apName = "VoltMon-" + name;
-    WiFi.softAP(apName.c_str(), "voltmon1");
-
+    String newApName = "VoltMon-" + name;
+    WiFi.softAP(newApName.c_str(), "voltmon1");
     req->send(200, "text/html", buildPage(cfg, creds, "Device name saved."));
   });
 
-  // 404 — redirect everything else to portal
   portalServer.onNotFound([](AsyncWebServerRequest* req) {
     req->redirect("/");
   });
@@ -320,11 +293,9 @@ void startPortal(DeviceConfig& cfg, WiFiCredentials& creds) {
 }
 
 // ===== STOP PORTAL =====
-// Only call this when WiFi has successfully connected
-// Do not call while a user may be connected to the AP
 void stopPortal() {
   if (!portalActive) return;
-  dnsServer.stop();
+  if (dnsServer) dnsServer->stop();
   portalServer.end();
   WiFi.softAPdisconnect(true);
   portalActive = false;
