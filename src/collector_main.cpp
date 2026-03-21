@@ -303,16 +303,7 @@ void streamOTAToVoltMon() {
                  bleOtaTargetDevice());
   setActivityLED(COLOR_PURPLE);
 
-  // Give VoltMon time to subscribe to notifications and call Update.begin()
-  // VoltMon reads ctrl char after OK confirm (within ~1-2 seconds)
-  delay(3000);
-
-  if (!collectorConnected) {
-    Serial.println("OTA stream: VoltMon disconnected during wait");
-    return;
-  }
-
-  // Open firmware stream
+  // Open HTTP stream FIRST before any delay — minimizes gap where BLE is idle
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
 
@@ -334,6 +325,29 @@ void streamOTAToVoltMon() {
 
   int contentLength = http.getSize();
   Serial.println("OTA stream: content-length=" + String(contentLength));
+
+  // Wait for VoltMon to signal OTA_READY (subscribed and Update.begin() called)
+  Serial.println("OTA stream: waiting for VoltMon OTA_READY signal...");
+  bleOtaClearReady();
+  unsigned long readyWait = millis();
+  while (!bleOtaReadyReceived() && collectorConnected && millis() - readyWait < 10000) {
+    feedWatchdog();
+    delay(50);
+  }
+
+  if (!bleOtaReadyReceived()) {
+    Serial.println("OTA stream: VoltMon never sent OTA_READY — aborting");
+    http.end();
+    return;
+  }
+
+  if (!collectorConnected) {
+    Serial.println("OTA stream: VoltMon disconnected waiting for OTA_READY");
+    http.end();
+    return;
+  }
+
+  Serial.println("OTA stream: OTA_READY received — starting stream");
 
   WiFiClient* stream = http.getStreamPtr();
 
@@ -416,16 +430,11 @@ void streamOTAToVoltMon() {
 void bufferRecords(const String& deviceId, const String& records) {
   if (deviceId.length() == 0 || records.length() == 0) return;
 
-  if (!LittleFS.exists(COLLECTOR_PENDING_FILE)) {
-    File init = LittleFS.open(COLLECTOR_PENDING_FILE, "w");
-    if (init) init.close();
-  }
-
-  File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a");
-  if (!f) {
-    Serial.println("ERROR: Cannot open collector pending for write");
-    return;
-  }
+    File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a", true);
+    if (!f) {
+        Serial.println("ERROR: Cannot open collector pending for write");
+        return;
+    }
 
   int start   = 0;
   int written = 0;
@@ -784,6 +793,23 @@ void loop() {
                    "] len:" + String(records.length()) +
                    " empty:" + String(isEmpty));
 
+    bleClearReceived();
+
+    // ===== OTA STREAM FIRST — VoltMon is still connected waiting =====
+    if (bleOtaStreamPending() && collectorConnected && wifiConnected) {
+      Serial.println("OTA stream: starting firmware stream to " + bleOtaTargetDevice());
+      streamOTAToVoltMon();
+      bleOtaClearPending();
+      setActivityLED(COLOR_DIM_BLUE);
+      // VoltMon reboots after OTA — skip record upload this cycle
+      return;
+    } else if (bleOtaStreamPending()) {
+      Serial.println("OTA stream: skipped — connected:" + String(collectorConnected) +
+                     " wifi:" + String(wifiConnected));
+      bleOtaClearPending();
+    }
+
+    // ===== THEN HANDLE RECORDS =====
     if (isEmpty) {
       Serial.println("BLE: VoltMon has no pending records");
       flashActivity(COLOR_CYAN, 2, 100);
@@ -808,21 +834,7 @@ void loop() {
       }
     }
 
-    bleClearReceived();
     setActivityLED(COLOR_DIM_BLUE);
-
-    // OTA stream happens AFTER records are processed and confirmed
-    // VoltMon is still connected, waiting for OTA data
-    if (bleOtaStreamPending() && collectorConnected && wifiConnected) {
-      Serial.println("OTA stream: records done, starting firmware stream...");
-      streamOTAToVoltMon();
-      bleOtaClearPending();
-      setActivityLED(COLOR_DIM_BLUE);
-    } else if (bleOtaStreamPending()) {
-      Serial.println("OTA stream: skipped — connected:" + String(collectorConnected) +
-                     " wifi:" + String(wifiConnected));
-      bleOtaClearPending();
-    }
   }
 
   // Retry buffered uploads

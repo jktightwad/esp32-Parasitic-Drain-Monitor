@@ -326,16 +326,10 @@ void writePending(DateTime now, float truckVolts, float battVolts, bool charging
     }
   }
 
-  // Create file if it doesn't exist
-  if (!LittleFS.exists(PENDING_FILE)) {
-    File init = LittleFS.open(PENDING_FILE, "w");
-    if (init) init.close();
-  }
-
-  File f;
+File f;
   int retries = 0;
   while (retries < 3) {
-    f = LittleFS.open(PENDING_FILE, "a");
+    f = LittleFS.open(PENDING_FILE, "a", true);
     if (f) break;
     debugLog("Pending open failed — retry " + String(retries + 1));
     delay(1000);

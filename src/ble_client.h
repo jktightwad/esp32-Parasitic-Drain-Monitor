@@ -23,6 +23,7 @@ static NimBLECharacteristic* collectorOtaCtrlChar  = nullptr;
 static bool   collectorConnected    = false;
 static bool   collectorDataReceived = false;
 static bool   otaStreamPending      = false;
+static bool   otaReadyReceived      = false;
 static String otaTargetDevice       = "";
 
 static String receivedDeviceId      = "";
@@ -50,6 +51,7 @@ class CollectorServerCallbacks : public NimBLEServerCallbacks {
     receivedRecords       = "";
     receivedEmpty         = false;
     otaStreamPending      = false;
+    otaReadyReceived       = false;
     resetChunkState();
     // Clear OTA ctrl so VoltMon reads empty unless we set it
     collectorOtaCtrlChar->setValue("");
@@ -69,6 +71,13 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
     std::string val = pChar->getValue();
     String s = String(val.c_str());
     s.trim();
+
+    // Check for OTA_READY signal from VoltMon
+    if (s == "OTA_READY") {
+      Serial.println("BLE: VoltMon OTA_READY received");
+      otaReadyReceived = true;
+      return;
+    }
 
     // Parse "deviceName:version" format
     int colonIdx = s.indexOf(':');
@@ -242,6 +251,8 @@ String bleGetRecords()       { return receivedRecords; }
 bool   bleGotEmpty()         { return receivedEmpty; }
 bool   bleOtaStreamPending() { return otaStreamPending; }
 void   bleOtaClearPending()  { otaStreamPending = false; otaTargetDevice = ""; }
+bool   bleOtaReadyReceived() { return otaReadyReceived; }
+void   bleOtaClearReady()    { otaReadyReceived = false; }
 String bleOtaTargetDevice()  { return otaTargetDevice; }
 
 void bleClearReceived() {

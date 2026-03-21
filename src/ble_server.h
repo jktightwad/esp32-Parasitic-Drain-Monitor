@@ -160,6 +160,9 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
           otaDataChar->subscribe(true, bleOtaDataCallback);
           otaSubscribed = true;
           Serial.println("BLE OTA: Subscribed to data notifications");
+          // Signal collector we are ready to receive
+          deviceIdChar->writeValue("OTA_READY", true);
+          Serial.println("BLE OTA: Signaled OTA_READY to collector");
         } else {
           Serial.println("BLE OTA: Cannot subscribe to notifications");
           Update.abort();
