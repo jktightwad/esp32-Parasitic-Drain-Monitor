@@ -80,5 +80,6 @@ jobs:
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/jktightwad/esp32-Parasitic-Drain-Monitor.git
           git add firmware/voltmon/firmware.bin firmware/voltmon/version.txt
           git add firmware/collector/firmware.bin firmware/collector/version.txt
-          git diff --staged --quiet || git commit -m "firmware: voltmon=${{ steps.voltmon_version.outputs.version }} collector=${{ steps.collector_version.outputs.version }}"
+          git add firmware/firmware.bin firmware/version.txt
+          git commit --allow-empty -m "firmware: voltmon=${{ steps.voltmon_version.outputs.version }} collector=${{ steps.collector_version.outputs.version }}"
           git push
