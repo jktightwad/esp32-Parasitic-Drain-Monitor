@@ -5,105 +5,19 @@
 #include <Update.h>
 #include "config.h"
 #include "storage.h"
+#include "esp_task_wdt.h"
 
-// ===== STATE =====
-static NimBLEServer*         bleServer       = nullptr;
-static NimBLECharacteristic* bleRecordsChar  = nullptr;
-static NimBLECharacteristic* bleConfirmChar  = nullptr;
-static NimBLECharacteristic* bleDeviceIdChar = nullptr;
-static NimBLECharacteristic* bleOtaChar      = nullptr;
-static NimBLECharacteristic* bleOtaCtrlChar  = nullptr;
+// ===== OTA RECEIVE STATE =====
+static volatile size_t bleOtaReceived = 0;
+static volatile bool   bleOtaDone     = false;
+static volatile bool   bleOtaSuccess  = false;
 
-static bool   bleConnected       = false;
-static bool   bleTransferDone    = false;
-static bool   bleTransferSuccess = false;
-static bool   bleOtaPending      = false;
-static size_t otaExpectedSize    = 0;
-static size_t otaReceivedBytes   = 0;
-static bool   otaInProgress      = false;
-
-// ===== SERVER CALLBACKS =====
-class VoltMonServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer* server) override {
-    bleConnected       = true;
-    bleTransferDone    = false;
-    bleTransferSuccess = false;
-    Serial.println("BLE: Collector connected");
-  }
-  void onDisconnect(NimBLEServer* server) override {
-    bleConnected = false;
-    Serial.println("BLE: Collector disconnected");
-  }
-};
-
-// ===== CONFIRM CALLBACKS =====
-class ConfirmCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* pChar) override {
-    std::string val = pChar->getValue();
-    String s = String(val.c_str());
-    s.trim();
-    Serial.println("BLE confirm: " + s);
-    if (s == "OK") {
-      bleTransferSuccess = true;
-      bleTransferDone    = true;
-    } else if (s == "FAIL") {
-      bleTransferSuccess = false;
-      bleTransferDone    = true;
-    }
-  }
-};
-
-// ===== OTA CONTROL CALLBACKS =====
-class OtaCtrlCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* pChar) override {
-    std::string val = pChar->getValue();
-    String s = String(val.c_str());
-    s.trim();
-    Serial.println("BLE OTA ctrl: " + s);
-
-    if (s.startsWith("OTA_START:")) {
-      otaExpectedSize  = s.substring(10).toInt();
-      otaReceivedBytes = 0;
-      otaInProgress    = true;
-      if (!Update.begin(otaExpectedSize)) {
-        Serial.println("OTA begin failed");
-        otaInProgress = false;
-      } else {
-        Serial.println("OTA started — " + String(otaExpectedSize) + " bytes");
-      }
-    } else if (s == "OTA_END") {
-      if (otaInProgress) {
-        if (Update.end(true)) {
-          Serial.println("OTA complete — rebooting");
-          bleOtaPending = true;
-        } else {
-          Serial.println("OTA end failed");
-          Update.abort();
-        }
-        otaInProgress = false;
-      }
-    } else if (s == "OTA_ABORT") {
-      Update.abort();
-      otaInProgress    = false;
-      otaReceivedBytes = 0;
-    }
-  }
-};
-
-// ===== OTA DATA CALLBACKS =====
-class OtaDataCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* pChar) override {
-    if (!otaInProgress) return;
-    std::string data = pChar->getValue();
-    size_t len = data.length();
-    if (len == 0) return;
-    size_t written = Update.write((uint8_t*)data.c_str(), len);
-    otaReceivedBytes += written;
-    String progress = "ACK:" + String(otaReceivedBytes);
-    bleOtaChar->setValue(progress.c_str());
-    bleOtaChar->notify();
-  }
-};
+static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
+                                uint8_t* data, size_t length, bool isNotify) {
+  if (length == 0) return;
+  Update.write(data, length);
+  bleOtaReceived += length;
+}
 
 // ===== LOAD PENDING RECORDS =====
 static String loadPendingRecords() {
@@ -121,50 +35,6 @@ static String loadPendingRecords() {
   }
   f.close();
   return content;
-}
-
-// ===== INIT BLE SERVER =====
-void bleServerInit(const DeviceConfig& cfg) {
-  NimBLEDevice::init(BLE_DEVICE_NAME);
-  NimBLEDevice::setMTU(512);
-
-  bleServer = NimBLEDevice::createServer();
-  bleServer->setCallbacks(new VoltMonServerCallbacks());
-
-  NimBLEService* service = bleServer->createService(BLE_SERVICE_UUID);
-
-  bleDeviceIdChar = service->createCharacteristic(
-    BLE_DEVICE_ID_CHAR_UUID,
-    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-  );
-  bleDeviceIdChar->setValue(cfg.deviceName);
-
-  bleRecordsChar = service->createCharacteristic(
-    BLE_RECORDS_CHAR_UUID,
-    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-  );
-  bleRecordsChar->setValue("");
-
-  bleConfirmChar = service->createCharacteristic(
-    BLE_CONFIRM_CHAR_UUID,
-    NIMBLE_PROPERTY::WRITE
-  );
-  bleConfirmChar->setCallbacks(new ConfirmCallbacks());
-
-  bleOtaChar = service->createCharacteristic(
-    BLE_OTA_CHAR_UUID,
-    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
-  );
-  bleOtaChar->setCallbacks(new OtaDataCallbacks());
-
-  bleOtaCtrlChar = service->createCharacteristic(
-    BLE_OTA_CTRL_CHAR_UUID,
-    NIMBLE_PROPERTY::WRITE
-  );
-  bleOtaCtrlChar->setCallbacks(new OtaCtrlCallbacks());
-
-  service->start();
-  Serial.println("BLE server started — " + String(cfg.deviceName));
 }
 
 // ===== SCAN FOR COLLECTOR AND TRANSFER =====
@@ -219,6 +89,7 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   NimBLERemoteCharacteristic* confirmChar  = service->getCharacteristic(BLE_CONFIRM_CHAR_UUID);
   NimBLERemoteCharacteristic* deviceIdChar = service->getCharacteristic(BLE_DEVICE_ID_CHAR_UUID);
   NimBLERemoteCharacteristic* otaCtrlChar  = service->getCharacteristic(BLE_OTA_CTRL_CHAR_UUID);
+  NimBLERemoteCharacteristic* otaDataChar  = service->getCharacteristic(BLE_OTA_CHAR_UUID);
 
   if (!recordsChar || !confirmChar || !deviceIdChar) {
     Serial.println("BLE: Required characteristics not found");
@@ -227,17 +98,19 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     return false;
   }
 
-  // Send device ID
-  deviceIdChar->writeValue(cfg.deviceName, true);
+  // Send device ID + current version so collector can check for OTA
+  String deviceIdPayload = String(cfg.deviceName) + ":" + String(VOLTMON_VERSION);
+  deviceIdChar->writeValue(deviceIdPayload.c_str(), true);
 
   bool transferOk = false;
 
   if (hasRecords) {
     String records = loadPendingRecords();
-if (records.length() > 0) {
+    if (records.length() > 0) {
+      // Prepend device name so collector knows which tab to write to
       String payload = String(cfg.deviceName) + "|" + records;
       recordsChar->writeValue(payload.c_str(), true);
-      Serial.println("BLE: Sent " + String(records.length()) + " bytes");
+      Serial.println("BLE: Sent " + String(payload.length()) + " bytes");
 
       unsigned long start = millis();
       while (millis() - start < 10000) {
@@ -263,24 +136,73 @@ if (records.length() > 0) {
     transferOk = true;
   }
 
-  // Check for pending commands
-  if (otaCtrlChar) {
-    std::string cmd = otaCtrlChar->readValue();
-    String cs = String(cmd.c_str());
-    cs.trim();
-    if (cs.length() > 0) {
-      Serial.println("BLE: Command: " + cs);
-      if (cs == "DEBUG_ON") {
-        cfg.debugMode = true;
-        saveConfig(cfg);
-      } else if (cs == "DEBUG_OFF") {
-        cfg.debugMode = false;
-        saveConfig(cfg);
-      } else if (cs.startsWith("SLEEP:")) {
-        int newSleep = cs.substring(6).toInt();
-        if (newSleep >= 60 && newSleep <= 3600) {
-          cfg.sleepSeconds = newSleep;
-          saveConfig(cfg);
+  // ===== CHECK FOR OTA =====
+  if (otaCtrlChar && otaDataChar) {
+    std::string ctrl = otaCtrlChar->readValue();
+    String ctrlStr = String(ctrl.c_str());
+    ctrlStr.trim();
+
+    if (ctrlStr.startsWith("OTA_START:")) {
+      size_t firmwareSize = ctrlStr.substring(10).toInt();
+      Serial.println("BLE OTA: Starting — " + String(firmwareSize) + " bytes");
+
+      if (firmwareSize == 0 || !Update.begin(firmwareSize)) {
+        Serial.println("BLE OTA: Update.begin failed");
+      } else {
+        // Reset receive state
+        bleOtaReceived = 0;
+        bleOtaDone     = false;
+        bleOtaSuccess  = false;
+
+        // Subscribe to OTA data notifications
+        bool otaSubscribed = false;
+        if (otaDataChar->canNotify()) {
+          otaDataChar->subscribe(true, bleOtaDataCallback);
+          otaSubscribed = true;
+          Serial.println("BLE OTA: Subscribed to data notifications");
+        } else {
+          Serial.println("BLE OTA: Cannot subscribe to notifications");
+          Update.abort();
+        }
+
+        if (otaSubscribed) {
+          unsigned long otaStart = millis();
+          unsigned long lastLog  = millis();
+          unsigned long lastWdog = millis();
+
+          while (bleOtaReceived < firmwareSize &&
+                 millis() - otaStart < 360000UL &&
+                 client->isConnected()) {
+            if (millis() - lastWdog > 5000) {
+              esp_task_wdt_reset();
+              lastWdog = millis();
+            }
+            if (millis() - lastLog > 10000) {
+              Serial.println("BLE OTA: " +
+                             String(bleOtaReceived * 100 / firmwareSize) + "% (" +
+                             String(bleOtaReceived) + "/" + String(firmwareSize) + ")");
+              lastLog = millis();
+            }
+            delay(10);
+          }
+
+          if (bleOtaReceived >= firmwareSize) {
+            if (Update.end(true)) {
+              Serial.println("BLE OTA: Success — rebooting");
+              client->disconnect();
+              NimBLEDevice::deleteClient(client);
+              NimBLEDevice::deinit(true);
+              delay(500);
+              ESP.restart();
+            } else {
+              Serial.println("BLE OTA: Update.end failed");
+              Update.abort();
+            }
+          } else {
+            Serial.println("BLE OTA: Timeout — received " +
+                           String(bleOtaReceived) + "/" + String(firmwareSize));
+            Update.abort();
+          }
         }
       }
     }
@@ -291,12 +213,4 @@ if (records.length() > 0) {
 
   Serial.println("BLE: Transfer done — success: " + String(transferOk));
   return transferOk;
-}
-
-// ===== CLEANUP =====
-void bleServerStop() {
-  if (bleServer) {
-    NimBLEDevice::deinit(true);
-    bleServer = nullptr;
-  }
 }

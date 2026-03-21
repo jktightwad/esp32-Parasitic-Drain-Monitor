@@ -28,40 +28,24 @@ Adafruit_NeoPixel strip(VM_NEOPIXEL_COUNT, VM_PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800
 
 // ===== LED HELPERS =====
 void setWiFiLED(uint32_t color) {
-  for (int i = LED_WIFI_START; i < LED_WIFI_START + LED_WIFI_COUNT; i++) {
+  for (int i = LED_WIFI_START; i < LED_WIFI_START + LED_WIFI_COUNT; i++)
     strip.setPixelColor(i, color);
-  }
   strip.show();
 }
 
 void setUploadLED(uint32_t color) {
-  for (int i = LED_UPLOAD_START; i < LED_UPLOAD_START + LED_UPLOAD_COUNT; i++) {
+  for (int i = LED_UPLOAD_START; i < LED_UPLOAD_START + LED_UPLOAD_COUNT; i++)
     strip.setPixelColor(i, color);
-  }
   strip.show();
 }
 
 void setActivityLED(uint32_t color) {
-  for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
+  for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++)
     strip.setPixelColor(i, color);
-  }
   strip.show();
 }
 
-void clearActivity() {
-  setActivityLED(COLOR_OFF);
-}
-
-void animateChase(uint32_t color, int delayMs = 50) {
-  for (int i = 0; i < LED_ACTIVITY_COUNT; i++) {
-    for (int j = LED_ACTIVITY_START; j < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; j++) {
-      strip.setPixelColor(j, COLOR_OFF);
-    }
-    strip.setPixelColor(LED_ACTIVITY_START + i, color);
-    strip.show();
-    delay(delayMs);
-  }
-}
+void clearActivity() { setActivityLED(COLOR_OFF); }
 
 void animatePulse(uint32_t color, int steps = 20, int delayMs = 30) {
   for (int i = 0; i <= steps; i++) {
@@ -90,10 +74,14 @@ void flashActivity(uint32_t color, int times = 3, int delayMs = 150) {
 }
 
 // ===== GLOBALS =====
-bool fsReady         = false;
-bool mqttReady       = false;
-bool wifiConnected   = false;
-bool hasPendingBuffer = false;  // tracks whether col_pending.csv has data
+bool fsReady          = false;
+bool mqttReady        = false;
+bool wifiConnected    = false;
+bool hasPendingBuffer = false;
+
+// ===== VOLTMON OTA CACHE — declared extern in ble_client.h =====
+String cachedVoltMonVersion = "";
+size_t cachedFirmwareSize   = 0;
 
 #define COLLECTOR_PENDING_FILE  "/col_pending.csv"
 
@@ -140,14 +128,12 @@ bool initFS() {
     LittleFS.end();
     LittleFS.format();
     if (!LittleFS.begin(true)) return false;
-    // Try again after format
     f = LittleFS.open("/fstest", "w");
     if (!f) return false;
   }
   f.close();
   LittleFS.remove("/fstest");
 
-  // Check if pending buffer already exists from previous session
   File pf = LittleFS.open(COLLECTOR_PENDING_FILE, "r");
   if (pf && pf.size() > 0) {
     hasPendingBuffer = true;
@@ -192,9 +178,6 @@ bool connectWiFi() {
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);
   WiFi.mode(WIFI_STA);
-
-  Serial.println("WiFi SSID: [" + String(WIFI_SSIDS[0]) + "]");
-  Serial.println("WiFi PASS length: " + String(strlen(WIFI_PASSWORDS[0])));
   WiFi.begin(WIFI_SSIDS[0], WIFI_PASSWORDS[0]);
 
   int attempts = 0;
@@ -225,14 +208,15 @@ void maintainWiFi() {
     Serial.println("WiFi lost — reconnecting...");
     WiFi.disconnect();
     delay(1000);
-    connectWiFi();
+    if (connectWiFi() && cachedVoltMonVersion.length() == 0) {
+      checkVoltMonFirmwareVersion();
+    }
   }
 }
 
 // ===== MQTT CONNECT =====
 bool connectMQTT() {
   if (!wifiConnected) return false;
-
   int attempts = 0;
   while (mqtt.connect() != 0 && attempts < 3) {
     mqtt.disconnect();
@@ -240,27 +224,211 @@ bool connectMQTT() {
     delay(2000);
     attempts++;
   }
-
   return mqtt.connected();
+}
+
+// ===== VOLTMON FIRMWARE VERSION CHECK =====
+// Fetches version.txt and Content-Length of firmware binary
+// Updates cachedVoltMonVersion and cachedFirmwareSize globals
+void checkVoltMonFirmwareVersion() {
+  if (!wifiConnected) return;
+
+  Serial.println("Checking VoltMon firmware version...");
+
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure();
+
+  HTTPClient http;
+  http.begin(secureClient, VOLTMON_OTA_VERSION_URL);
+  http.setTimeout(10000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  feedWatchdog();
+  int httpCode = http.GET();
+  feedWatchdog();
+
+  if (httpCode != 200) {
+    Serial.println("VoltMon version check failed — HTTP " + String(httpCode));
+    http.end();
+    return;
+  }
+
+  String remoteVersion = http.getString();
+  http.end();
+  remoteVersion.trim();
+
+  if (remoteVersion == cachedVoltMonVersion && cachedFirmwareSize > 0) {
+    Serial.println("VoltMon firmware unchanged: " + remoteVersion);
+    return;
+  }
+
+  // Fetch firmware to get size (Content-Length from headers)
+  http.begin(secureClient, VOLTMON_OTA_FIRMWARE_URL);
+  http.setTimeout(10000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  feedWatchdog();
+  httpCode = http.GET();
+  feedWatchdog();
+
+  if (httpCode == 200) {
+    int size = http.getSize();
+    http.end();
+
+    if (size > 0) {
+      cachedVoltMonVersion = remoteVersion;
+      cachedFirmwareSize   = (size_t)size;
+      Serial.println("VoltMon firmware cached: v" + cachedVoltMonVersion +
+                     " size=" + String(cachedFirmwareSize) + " bytes");
+    } else {
+      Serial.println("VoltMon firmware size unknown");
+      http.end();
+    }
+  } else {
+    Serial.println("VoltMon firmware fetch failed — HTTP " + String(httpCode));
+    http.end();
+  }
+}
+
+// ===== STREAM OTA FIRMWARE TO VOLTMON OVER BLE =====
+void streamOTAToVoltMon() {
+  if (!collectorConnected) {
+    Serial.println("OTA stream: VoltMon disconnected before stream started");
+    return;
+  }
+
+  Serial.println("OTA stream: Starting — " + String(cachedFirmwareSize) + " bytes to " +
+                 bleOtaTargetDevice());
+  setActivityLED(COLOR_PURPLE);
+
+  // Give VoltMon time to subscribe to notifications and call Update.begin()
+  // VoltMon reads ctrl char after OK confirm (within ~1-2 seconds)
+  delay(3000);
+
+  if (!collectorConnected) {
+    Serial.println("OTA stream: VoltMon disconnected during wait");
+    return;
+  }
+
+  // Open firmware stream
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure();
+
+  HTTPClient http;
+  http.begin(secureClient, VOLTMON_OTA_FIRMWARE_URL);
+  http.setTimeout(60000);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+  feedWatchdog();
+  int httpCode = http.GET();
+  feedWatchdog();
+
+  if (httpCode != 200) {
+    Serial.println("OTA stream: firmware fetch failed — HTTP " + String(httpCode));
+    http.end();
+    flashActivity(COLOR_RED, 5, 100);
+    return;
+  }
+
+  int contentLength = http.getSize();
+  Serial.println("OTA stream: content-length=" + String(contentLength));
+
+  WiFiClient* stream = http.getStreamPtr();
+
+  const size_t CHUNK_SIZE = 480;
+  uint8_t      buf[CHUNK_SIZE];
+  size_t       totalSent     = 0;
+  unsigned long lastWdog     = millis();
+  unsigned long lastProgress = millis();
+
+  while (http.connected() && totalSent < (size_t)contentLength && collectorConnected) {
+    size_t available = stream->available();
+    if (available == 0) {
+      delay(5);
+      continue;
+    }
+
+    size_t toRead    = min(available, CHUNK_SIZE);
+    size_t bytesRead = stream->readBytes(buf, toRead);
+
+    if (bytesRead == 0) continue;
+
+    // Send chunk via BLE notification
+    collectorOtaChar->setValue(buf, bytesRead);
+    collectorOtaChar->notify();
+    totalSent += bytesRead;
+
+    // Throttle to avoid BLE queue overflow
+    delay(30);
+
+    if (millis() - lastWdog > 5000) {
+      feedWatchdog();
+      lastWdog = millis();
+    }
+
+    if (millis() - lastProgress > 10000) {
+      int pct = (contentLength > 0) ? (totalSent * 100 / contentLength) : 0;
+      Serial.println("OTA stream: " + String(pct) + "% (" +
+                     String(totalSent) + "/" + String(contentLength) + ")");
+
+      // LED progress bar
+      int ledsOn = (totalSent * LED_ACTIVITY_COUNT) / contentLength;
+      for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
+        strip.setPixelColor(i, (i - LED_ACTIVITY_START) < ledsOn ? COLOR_PURPLE : COLOR_OFF);
+      }
+      strip.show();
+      lastProgress = millis();
+    }
+  }
+
+  http.end();
+
+  if (!collectorConnected) {
+    Serial.println("OTA stream: VoltMon disconnected during transfer at " +
+                   String(totalSent) + "/" + String(contentLength));
+    flashActivity(COLOR_RED, 5, 100);
+    return;
+  }
+
+  if (totalSent >= (size_t)contentLength) {
+    Serial.println("OTA stream: Complete — " + String(totalSent) + " bytes sent");
+    // VoltMon finalizes and reboots on its own once all bytes received
+    flashActivity(COLOR_GREEN, 5, 100);
+    setUploadLED(COLOR_GREEN);
+
+    // Publish status to MQTT
+    if (connectMQTT()) {
+      String msg = "OTA_PROXY_OK_" + cachedVoltMonVersion +
+                   "_to_" + bleOtaTargetDevice();
+      feedDebug->publish(msg.c_str());
+      mqtt.disconnect();
+    }
+  } else {
+    Serial.println("OTA stream: Incomplete — sent " + String(totalSent) +
+                   "/" + String(contentLength));
+    flashActivity(COLOR_RED, 5, 100);
+  }
 }
 
 // ===== BUFFER RECORDS =====
 void bufferRecords(const String& deviceId, const String& records) {
-  if (deviceId.length() == 0 || records.length() == 0) {
-    Serial.println("bufferRecords: skipping empty data");
-    return;
+  if (deviceId.length() == 0 || records.length() == 0) return;
+
+  if (!LittleFS.exists(COLLECTOR_PENDING_FILE)) {
+    File init = LittleFS.open(COLLECTOR_PENDING_FILE, "w");
+    if (init) init.close();
   }
 
-  File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a", true);
+  File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a");
   if (!f) {
     Serial.println("ERROR: Cannot open collector pending for write");
     return;
   }
 
-  int start = 0;
+  int start   = 0;
   int written = 0;
   while (start < (int)records.length()) {
-    int end = records.indexOf('|', start);
+    int end    = records.indexOf('|', start);
     if (end < 0) end = records.length();
     String record = records.substring(start, end);
     record.trim();
@@ -281,10 +449,7 @@ bool uploadBuffered() {
   if (!hasPendingBuffer) return true;
 
   File f = LittleFS.open(COLLECTOR_PENDING_FILE, "r");
-  if (!f) {
-    hasPendingBuffer = false;
-    return true;
-  }
+  if (!f) { hasPendingBuffer = false; return true; }
 
   if (f.size() == 0) {
     f.close();
@@ -364,7 +529,6 @@ bool uploadBuffered() {
 
     if (response.indexOf("\"ok\"") < 0) {
       allOk = false;
-      Serial.println("Upload failed for: " + groups[g].deviceId);
     }
   }
 
@@ -383,14 +547,11 @@ bool uploadBuffered() {
 
 // ===== PUBLISH MQTT =====
 void publishToMQTT(const String& deviceId, const String& records) {
-  if (!connectMQTT()) {
-    Serial.println("MQTT connect failed — skipping publish");
-    return;
-  }
+  if (!connectMQTT()) return;
 
   float lastTruck = 0, lastBatt = 0;
-  int lastPipe    = records.lastIndexOf('|');
-  String lastRec  = (lastPipe >= 0) ? records.substring(lastPipe + 1) : records;
+  int lastPipe   = records.lastIndexOf('|');
+  String lastRec = (lastPipe >= 0) ? records.substring(lastPipe + 1) : records;
 
   int c1 = lastRec.indexOf(',');
   int c2 = lastRec.indexOf(',', c1 + 1);
@@ -407,11 +568,10 @@ void publishToMQTT(const String& deviceId, const String& records) {
   String dbg = "BLE_RX device:" + deviceId +
                " Truck:" + String(lastTruck, 3) +
                " Batt:" + String(lastBatt, 3) +
-               " CollectorV:" + String(COLLECTOR_VERSION);
+               " v" + String(COLLECTOR_VERSION);
   feedDebug->publish(dbg.c_str());
 
   mqtt.disconnect();
-  Serial.println("MQTT published for: " + deviceId);
 }
 
 // ===== CHECK MQTT CONTROL MESSAGES =====
@@ -431,24 +591,13 @@ void checkControlMessages() {
 
       if (cmd.startsWith("debug=on")) {
         String target = cmd.indexOf(':') > 0 ? cmd.substring(cmd.indexOf(':') + 1) : "ALL";
-        if (target == "ALL" || target == FALLBACK_DEVICE_NAME) {
-          bleSetPendingCommand("DEBUG_ON");
-          Serial.println("Debug ON queued for: " + target);
-        }
+        bleSetPendingCommand("DEBUG_ON");
       } else if (cmd.startsWith("debug=off")) {
-        String target = cmd.indexOf(':') > 0 ? cmd.substring(cmd.indexOf(':') + 1) : "ALL";
-        if (target == "ALL" || target == FALLBACK_DEVICE_NAME) {
-          bleSetPendingCommand("DEBUG_OFF");
-          Serial.println("Debug OFF queued for: " + target);
-        }
+        bleSetPendingCommand("DEBUG_OFF");
       } else if (cmd.startsWith("sleep=")) {
         int colonIdx  = cmd.indexOf(':');
         String value  = (colonIdx > 0) ? cmd.substring(6, colonIdx) : cmd.substring(6);
-        String target = (colonIdx > 0) ? cmd.substring(colonIdx + 1) : "ALL";
-        if (target == "ALL" || target == FALLBACK_DEVICE_NAME) {
-          bleSetPendingCommand("SLEEP:" + value);
-          Serial.println("Sleep " + value + "s queued for: " + target);
-        }
+        bleSetPendingCommand("SLEEP:" + value);
       } else if (cmd == "reboot") {
         Serial.println("Reboot command received");
         delay(500);
@@ -520,7 +669,6 @@ void checkAndApplyOTA() {
     Serial.println("OTA begin failed");
     http.end();
     esp_task_wdt_init(120, false);
-    flashActivity(COLOR_RED);
     return;
   }
 
@@ -554,7 +702,6 @@ void checkAndApplyOTA() {
     Serial.println("OTA failed");
     Update.abort();
     esp_task_wdt_init(120, false);
-    flashActivity(COLOR_RED);
     return;
   }
 
@@ -567,8 +714,6 @@ void checkAndApplyOTA() {
 // ===== SETUP =====
 void setup() {
   Serial.begin(115200);
-  Serial.println("LittleFS total: " + String(LittleFS.totalBytes()));
-  Serial.println("LittleFS used: "  + String(LittleFS.usedBytes()));
   esp_task_wdt_init(120, false);
   delay(2000);
 
@@ -605,9 +750,19 @@ void setup() {
   }
 
   setupMQTT();
+
+  // Check VoltMon firmware version on startup
+  if (wifiConnected) {
+    checkVoltMonFirmwareVersion();
+  }
+
   collectorBleInit();
 
   Serial.println("Collector ready — waiting for VoltMon");
+  if (cachedVoltMonVersion.length() > 0) {
+    Serial.println("VoltMon firmware cached: v" + cachedVoltMonVersion +
+                   " (" + String(cachedFirmwareSize) + " bytes)");
+  }
   setActivityLED(COLOR_DIM_BLUE);
 }
 
@@ -631,10 +786,7 @@ void loop() {
       Serial.println("BLE: VoltMon has no pending records");
       flashActivity(COLOR_CYAN, 2, 100);
     } else {
-      Serial.println("BLE: Received " + String(records.length()) +
-                     " bytes from " + deviceId);
       setActivityLED(COLOR_WHITE);
-
       bufferRecords(deviceId, records);
 
       if (wifiConnected) {
@@ -656,9 +808,22 @@ void loop() {
 
     bleClearReceived();
     setActivityLED(COLOR_DIM_BLUE);
+
+    // OTA stream happens AFTER records are processed and confirmed
+    // VoltMon is still connected, waiting for OTA data
+    if (bleOtaStreamPending() && collectorConnected && wifiConnected) {
+      Serial.println("OTA stream: records done, starting firmware stream...");
+      streamOTAToVoltMon();
+      bleOtaClearPending();
+      setActivityLED(COLOR_DIM_BLUE);
+    } else if (bleOtaStreamPending()) {
+      Serial.println("OTA stream: skipped — connected:" + String(collectorConnected) +
+                     " wifi:" + String(wifiConnected));
+      bleOtaClearPending();
+    }
   }
 
-  // Retry buffered uploads — uses flag, not LittleFS.exists()
+  // Retry buffered uploads
   static unsigned long lastUploadRetry = 0;
   if (wifiConnected && hasPendingBuffer) {
     if (millis() - lastUploadRetry > COLLECTOR_UPLOAD_RETRY_MS) {
@@ -677,13 +842,20 @@ void loop() {
     lastMQTTCheck = millis();
   }
 
-  // Check collector OTA once per hour
+  // Check VoltMon firmware version every hour
+  static unsigned long lastVoltMonVersionCheck = 0;
+  if (wifiConnected && millis() - lastVoltMonVersionCheck > 3600000UL) {
+    checkVoltMonFirmwareVersion();
+    lastVoltMonVersionCheck = millis();
+  }
+
+  // Check collector OTA once per hour (offset by 5 minutes)
   static unsigned long lastOTACheck = 0;
-  if (wifiConnected && millis() - lastOTACheck > 3600000) {
+  if (wifiConnected && millis() - lastOTACheck > 3600000UL) {
     setActivityLED(COLOR_PURPLE);
     checkAndApplyOTA();
     setActivityLED(COLOR_DIM_BLUE);
-    lastOTACheck = millis();
+    lastOTACheck = millis() + 300000UL; // offset from VoltMon version check
   }
 
   // Idle pulse animation

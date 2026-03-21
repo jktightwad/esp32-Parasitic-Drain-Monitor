@@ -8,6 +8,10 @@
 #include "config.h"
 #include "storage.h"
 
+// ===== EXTERN — defined in collector_main.cpp =====
+extern String cachedVoltMonVersion;
+extern size_t cachedFirmwareSize;
+
 // ===== COLLECTOR BLE STATE =====
 static NimBLEServer*         collectorBleServer    = nullptr;
 static NimBLECharacteristic* collectorRecordsChar  = nullptr;
@@ -18,6 +22,8 @@ static NimBLECharacteristic* collectorOtaCtrlChar  = nullptr;
 
 static bool   collectorConnected    = false;
 static bool   collectorDataReceived = false;
+static bool   otaStreamPending      = false;
+static String otaTargetDevice       = "";
 
 static String receivedDeviceId      = "";
 static String receivedRecords       = "";
@@ -43,7 +49,10 @@ class CollectorServerCallbacks : public NimBLEServerCallbacks {
     receivedDeviceId      = "";
     receivedRecords       = "";
     receivedEmpty         = false;
+    otaStreamPending      = false;
     resetChunkState();
+    // Clear OTA ctrl so VoltMon reads empty unless we set it
+    collectorOtaCtrlChar->setValue("");
     Serial.println("BLE: VoltMon connected");
   }
 
@@ -58,16 +67,44 @@ class CollectorServerCallbacks : public NimBLEServerCallbacks {
 class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* pChar) override {
     std::string val = pChar->getValue();
-    receivedDeviceId = String(val.c_str());
-    receivedDeviceId.trim();
-    Serial.println("BLE: Device ID: " + receivedDeviceId);
+    String s = String(val.c_str());
+    s.trim();
 
+    // Parse "deviceName:version" format
+    int colonIdx = s.indexOf(':');
+    if (colonIdx > 0) {
+      receivedDeviceId      = s.substring(0, colonIdx);
+      String reportedVersion = s.substring(colonIdx + 1);
+
+      Serial.println("BLE: Device ID: " + receivedDeviceId +
+                     " v" + reportedVersion);
+
+      // Check if OTA update is available
+      if (cachedVoltMonVersion.length() > 0 &&
+          cachedFirmwareSize > 0 &&
+          reportedVersion != cachedVoltMonVersion) {
+        String otaCmd = "OTA_START:" + String(cachedFirmwareSize);
+        collectorOtaCtrlChar->setValue(otaCmd.c_str());
+        otaStreamPending = true;
+        otaTargetDevice  = receivedDeviceId;
+        Serial.println("BLE: OTA queued for " + receivedDeviceId +
+                       " v" + reportedVersion + " -> " + cachedVoltMonVersion +
+                       " (" + String(cachedFirmwareSize) + " bytes)");
+      } else {
+        collectorOtaCtrlChar->setValue("");
+      }
+    } else {
+      // Old format without version — just device name
+      receivedDeviceId = s;
+      Serial.println("BLE: Device ID: " + receivedDeviceId + " (no version)");
+      collectorOtaCtrlChar->setValue("");
+    }
+
+    // Write any pending command
     if (pendingCommand.length() > 0) {
       collectorOtaCtrlChar->setValue(pendingCommand.c_str());
       Serial.println("BLE: Command queued: " + pendingCommand);
       pendingCommand = "";
-    } else {
-      collectorOtaCtrlChar->setValue("");
     }
   }
 };
@@ -129,7 +166,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
       return;
     }
 
-    // Single-value transfer (no chunking)
+    // Single-value transfer — parse deviceId|records
     int firstPipe = val.indexOf('|');
     if (firstPipe > 0) {
       receivedDeviceId = val.substring(0, firstPipe);
@@ -173,12 +210,14 @@ void collectorBleInit() {
   );
   collectorConfirmChar->setValue("");
 
+  // OTA data — collector notifies VoltMon with firmware chunks
   collectorOtaChar = service->createCharacteristic(
     BLE_OTA_CHAR_UUID,
-    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
+    NIMBLE_PROPERTY::NOTIFY
   );
   collectorOtaChar->setValue("");
 
+  // OTA ctrl — collector writes commands/status VoltMon reads
   collectorOtaCtrlChar = service->createCharacteristic(
     BLE_OTA_CTRL_CHAR_UUID,
     NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::READ
@@ -197,10 +236,13 @@ void collectorBleInit() {
 
 // ===== COMMAND / DATA ACCESSORS =====
 void   bleSetPendingCommand(const String& cmd) { pendingCommand = cmd; }
-bool   bleDataReceived()  { return collectorDataReceived; }
-String bleGetDeviceId()   { return receivedDeviceId; }
-String bleGetRecords()    { return receivedRecords; }
-bool   bleGotEmpty()      { return receivedEmpty; }
+bool   bleDataReceived()     { return collectorDataReceived; }
+String bleGetDeviceId()      { return receivedDeviceId; }
+String bleGetRecords()       { return receivedRecords; }
+bool   bleGotEmpty()         { return receivedEmpty; }
+bool   bleOtaStreamPending() { return otaStreamPending; }
+void   bleOtaClearPending()  { otaStreamPending = false; otaTargetDevice = ""; }
+String bleOtaTargetDevice()  { return otaTargetDevice; }
 
 void bleClearReceived() {
   collectorDataReceived = false;
@@ -208,42 +250,4 @@ void bleClearReceived() {
   receivedRecords       = "";
   receivedEmpty         = false;
   resetChunkState();
-}
-
-// ===== SEND OTA TO VOLTMON =====
-bool bleSendOTA(const uint8_t* firmware, size_t size) {
-  if (!collectorConnected) {
-    Serial.println("BLE OTA: VoltMon not connected");
-    return false;
-  }
-
-  Serial.println("BLE OTA: Starting — " + String(size) + " bytes");
-
-  String startCmd = "OTA_START:" + String(size);
-  collectorOtaCtrlChar->setValue(startCmd.c_str());
-  collectorOtaCtrlChar->notify();
-  delay(500);
-
-  const size_t CHUNK_SIZE = 400;
-  size_t sent = 0;
-
-  while (sent < size) {
-    if (!collectorConnected) {
-      Serial.println("BLE OTA: Lost connection at " + String(sent) + "/" + String(size));
-      return false;
-    }
-    size_t chunkLen = min(CHUNK_SIZE, size - sent);
-    collectorOtaChar->setValue((uint8_t*)(firmware + sent), chunkLen);
-    collectorOtaChar->notify();
-    sent += chunkLen;
-    Serial.println("BLE OTA: " + String(sent) + "/" + String(size));
-    delay(50);
-  }
-
-  collectorOtaCtrlChar->setValue("OTA_END");
-  collectorOtaCtrlChar->notify();
-  delay(500);
-
-  Serial.println("BLE OTA: Complete");
-  return true;
 }
