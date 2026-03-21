@@ -8,15 +8,26 @@
 #include "esp_task_wdt.h"
 
 // ===== OTA RECEIVE STATE =====
-static volatile size_t bleOtaReceived = 0;
-static volatile bool   bleOtaDone     = false;
-static volatile bool   bleOtaSuccess  = false;
+static volatile size_t bleOtaReceived  = 0;
+static volatile bool   bleOtaDone      = false;
+static volatile bool   bleOtaSuccess   = false;
+static volatile String bleOtaCtrlValue = "";
 
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
   if (length == 0) return;
+  // Single 0x00 byte is a keep-alive — ignore
+  if (length == 1 && data[0] == 0x00) return;
   Update.write(data, length);
   bleOtaReceived += length;
+}
+
+static void bleOtaCtrlCallback(NimBLERemoteCharacteristic* pChar,
+                                uint8_t* data, size_t length, bool isNotify) {
+  if (length == 0) return;
+  bleOtaCtrlValue = String((char*)data).substring(0, length);
+  bleOtaCtrlValue.trim();
+  Serial.println("BLE OTA ctrl notify: [" + bleOtaCtrlValue + "]");
 }
 
 // ===== LOAD PENDING RECORDS =====
@@ -98,6 +109,14 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     return false;
   }
 
+  // Subscribe to OTA ctrl notifications BEFORE writing device ID
+  // so we don't miss the notification from the collector
+  bleOtaCtrlValue = "";
+  if (otaCtrlChar && otaCtrlChar->canNotify()) {
+    otaCtrlChar->subscribe(true, bleOtaCtrlCallback);
+    Serial.println("BLE: Subscribed to OTA ctrl notifications");
+  }
+
   // Send device ID + current version so collector can check for OTA
   String deviceIdPayload = String(cfg.deviceName) + ":" + String(VOLTMON_VERSION);
   deviceIdChar->writeValue(deviceIdPayload.c_str(), true);
@@ -107,7 +126,6 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   if (hasRecords) {
     String records = loadPendingRecords();
     if (records.length() > 0) {
-      // Prepend device name so collector knows which tab to write to
       String payload = String(cfg.deviceName) + "|" + records;
       recordsChar->writeValue(payload.c_str(), true);
       Serial.println("BLE: Sent " + String(payload.length()) + " bytes");
@@ -137,40 +155,42 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   }
 
   // ===== CHECK FOR OTA =====
-if (otaCtrlChar && otaDataChar) {
-    delay(500);  // Allow collector to process device ID and set ctrl char
-    std::string ctrl = otaCtrlChar->readValue();
-    String ctrlStr = String(ctrl.c_str());
-    ctrlStr.trim();
-    Serial.println("BLE OTA ctrl read: [" + ctrlStr + "]");
+  // Wait up to 3 seconds for collector to notify OTA command
+  if (otaCtrlChar && otaDataChar) {
+    Serial.println("BLE: Waiting for OTA ctrl notification...");
+    unsigned long ctrlWait = millis();
+    while (bleOtaCtrlValue.length() == 0 &&
+           millis() - ctrlWait < 3000 &&
+           client->isConnected()) {
+      delay(50);
+    }
 
-    if (ctrlStr.startsWith("OTA_PREPARE:")) {
-      size_t firmwareSize = ctrlStr.substring(10).toInt();
+    Serial.println("BLE OTA ctrl: [" + bleOtaCtrlValue + "]");
+
+    if (bleOtaCtrlValue.startsWith("OTA_START:")) {
+      size_t firmwareSize = bleOtaCtrlValue.substring(10).toInt();
       Serial.println("BLE OTA: Starting — " + String(firmwareSize) + " bytes");
 
       if (firmwareSize == 0 || !Update.begin(firmwareSize)) {
         Serial.println("BLE OTA: Update.begin failed");
       } else {
         // Request longer supervision timeout for OTA (6000ms = 600 * 10ms)
-        // Default ~720ms is too short for HTTP GET on collector side
         client->setConnectionParams(12, 12, 0, 600);
-        Serial.println("BLE OTA: Extended connection timeout for OTA transfer");
-        // Reset receive state
+        Serial.println("BLE OTA: Extended connection timeout");
+
         bleOtaReceived = 0;
-        bleOtaDone     = false;
-        bleOtaSuccess  = false;
 
         // Subscribe to OTA data notifications
         bool otaSubscribed = false;
         if (otaDataChar->canNotify()) {
           otaDataChar->subscribe(true, bleOtaDataCallback);
           otaSubscribed = true;
-          Serial.println("BLE OTA: Subscribed to data notifications");
-          // Signal collector we are ready to receive
+          Serial.println("BLE OTA: Subscribed to data");
+          // Signal collector we are ready
           deviceIdChar->writeValue("OTA_READY", true);
-          Serial.println("BLE OTA: Signaled OTA_READY to collector");
+          Serial.println("BLE OTA: Sent OTA_READY");
         } else {
-          Serial.println("BLE OTA: Cannot subscribe to notifications");
+          Serial.println("BLE OTA: Cannot subscribe");
           Update.abort();
         }
 

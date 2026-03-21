@@ -92,8 +92,9 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
       if (cachedVoltMonVersion.length() > 0 &&
           cachedFirmwareSize > 0 &&
           reportedVersion != cachedVoltMonVersion) {
-        String otaCmd = "OTA_PREPARE:" + String(cachedFirmwareSize);
+        String otaCmd = "OTA_START:" + String(cachedFirmwareSize);
         collectorOtaCtrlChar->setValue(otaCmd.c_str());
+        collectorOtaCtrlChar->notify();
         otaStreamPending = true;
         otaTargetDevice  = receivedDeviceId;
         Serial.println("BLE: OTA queued for " + receivedDeviceId +
@@ -101,6 +102,7 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
                        " (" + String(cachedFirmwareSize) + " bytes)");
       } else {
         collectorOtaCtrlChar->setValue("");
+        collectorOtaCtrlChar->notify();
       }
     } else {
       // Old format without version — just device name
@@ -229,7 +231,7 @@ void collectorBleInit() {
   // OTA ctrl — collector writes commands/status VoltMon reads
   collectorOtaCtrlChar = service->createCharacteristic(
     BLE_OTA_CTRL_CHAR_UUID,
-    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::READ
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
   );
   collectorOtaCtrlChar->setValue("");
 
