@@ -92,7 +92,7 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
       if (cachedVoltMonVersion.length() > 0 &&
           cachedFirmwareSize > 0 &&
           reportedVersion != cachedVoltMonVersion) {
-        String otaCmd = "OTA_START:" + String(cachedFirmwareSize);
+        String otaCmd = "OTA_PREPARE:" + String(cachedFirmwareSize);
         collectorOtaCtrlChar->setValue(otaCmd.c_str());
         otaStreamPending = true;
         otaTargetDevice  = receivedDeviceId;

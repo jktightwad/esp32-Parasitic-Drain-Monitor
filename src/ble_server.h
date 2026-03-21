@@ -142,7 +142,7 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     String ctrlStr = String(ctrl.c_str());
     ctrlStr.trim();
 
-    if (ctrlStr.startsWith("OTA_START:")) {
+    if (ctrlStr.startsWith("OTA_PREPARE:")) {
       size_t firmwareSize = ctrlStr.substring(10).toInt();
       Serial.println("BLE OTA: Starting — " + String(firmwareSize) + " bytes");
 
