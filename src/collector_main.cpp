@@ -241,7 +241,8 @@ void checkVoltMonFirmwareVersion() {
   secureClient.setInsecure();
 
   HTTPClient http;
-  http.begin(secureClient, VOLTMON_OTA_VERSION_URL);
+  String versionUrl = String(VOLTMON_OTA_VERSION_URL) + "?t=" + String(millis());
+  http.begin(secureClient, versionUrl);
   http.setTimeout(10000);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
@@ -326,13 +327,20 @@ void streamOTAToVoltMon() {
   int contentLength = http.getSize();
   Serial.println("OTA stream: content-length=" + String(contentLength));
 
-  // Wait for VoltMon to signal OTA_READY (subscribed and Update.begin() called)
+// Wait for VoltMon to signal OTA_READY, sending keep-alives to prevent BLE timeout
   Serial.println("OTA stream: waiting for VoltMon OTA_READY signal...");
   bleOtaClearReady();
-  unsigned long readyWait = millis();
+  unsigned long readyWait   = millis();
+  unsigned long lastKeepAlive = millis();
+  uint8_t keepAliveByte = 0;
   while (!bleOtaReadyReceived() && collectorConnected && millis() - readyWait < 10000) {
     feedWatchdog();
-    delay(50);
+    if (millis() - lastKeepAlive > 200) {
+      collectorOtaChar->setValue(&keepAliveByte, 1);
+      collectorOtaChar->notify();
+      lastKeepAlive = millis();
+    }
+    delay(20);
   }
 
   if (!bleOtaReadyReceived()) {
@@ -529,9 +537,15 @@ bool uploadBuffered() {
     http.setTimeout(15000);
     http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
-    feedWatchdog();
-    int httpCode = http.GET();
-    feedWatchdog();
+// Send keep-alive to VoltMon while HTTP connects
+  uint8_t keepByte = 0;
+  collectorOtaChar->setValue(&keepByte, 1);
+  collectorOtaChar->notify();
+  feedWatchdog();
+  int httpCode = http.GET();
+  feedWatchdog();
+  collectorOtaChar->setValue(&keepByte, 1);
+  collectorOtaChar->notify();
 
     String response = http.getString();
     http.end();

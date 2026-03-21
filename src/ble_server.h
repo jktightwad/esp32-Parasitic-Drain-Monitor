@@ -149,6 +149,10 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
       if (firmwareSize == 0 || !Update.begin(firmwareSize)) {
         Serial.println("BLE OTA: Update.begin failed");
       } else {
+        // Request longer supervision timeout for OTA (6000ms = 600 * 10ms)
+        // Default ~720ms is too short for HTTP GET on collector side
+        client->setConnectionParams(12, 12, 0, 600);
+        Serial.println("BLE OTA: Extended connection timeout for OTA transfer");
         // Reset receive state
         bleOtaReceived = 0;
         bleOtaDone     = false;
