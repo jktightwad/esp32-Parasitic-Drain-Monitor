@@ -3,7 +3,7 @@
 #include "secrets.h"
 
 // ===== VOLTMON VERSION =====
-#define VOLTMON_VERSION     "2.1.2" // added OTA and corrected BLE
+#define VOLTMON_VERSION     "2.1.3" // added OTA and corrected BLE
 
 // ===== COLLECTOR VERSION =====
 #define COLLECTOR_VERSION   "1.1.3" // NimBLE configured with OTA for VoltMon
