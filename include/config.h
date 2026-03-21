@@ -3,10 +3,10 @@
 #include "secrets.h"
 
 // ===== VOLTMON VERSION =====
-#define VOLTMON_VERSION     "2.1.0" // added OTA and corrected BLE
+#define VOLTMON_VERSION     "2.1.1" // added OTA and corrected BLE
 
 // ===== COLLECTOR VERSION =====
-#define COLLECTOR_VERSION   "1.1.2" // NimBLE configured with OTA for VoltMon
+#define COLLECTOR_VERSION   "1.1.3" // NimBLE configured with OTA for VoltMon
 
 // ===== VOLTMON OTA =====
 #define VOLTMON_OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/voltmon/version.txt"
