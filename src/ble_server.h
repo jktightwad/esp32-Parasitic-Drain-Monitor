@@ -137,10 +137,12 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   }
 
   // ===== CHECK FOR OTA =====
-  if (otaCtrlChar && otaDataChar) {
+if (otaCtrlChar && otaDataChar) {
+    delay(500);  // Allow collector to process device ID and set ctrl char
     std::string ctrl = otaCtrlChar->readValue();
     String ctrlStr = String(ctrl.c_str());
     ctrlStr.trim();
+    Serial.println("BLE OTA ctrl read: [" + ctrlStr + "]");
 
     if (ctrlStr.startsWith("OTA_PREPARE:")) {
       size_t firmwareSize = ctrlStr.substring(10).toInt();

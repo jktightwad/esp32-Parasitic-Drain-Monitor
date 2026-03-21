@@ -850,10 +850,11 @@ void loop() {
   }
 
   // Retry buffered uploads
-  static unsigned long lastUploadRetry = 0;
+static unsigned long lastUploadRetry = 0;
   if (wifiConnected && hasPendingBuffer) {
     if (millis() - lastUploadRetry > COLLECTOR_UPLOAD_RETRY_MS) {
       Serial.println("Retrying buffered upload...");
+      maintainWiFi();
       setActivityLED(COLOR_CYAN);
       uploadBuffered();
       setActivityLED(COLOR_DIM_BLUE);
