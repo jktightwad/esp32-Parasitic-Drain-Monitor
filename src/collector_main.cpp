@@ -201,6 +201,8 @@ bool connectWiFi() {
   return false;
 }
 
+void checkVoltMonFirmwareVersion();  // forward declaration
+
 void maintainWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
     wifiConnected = false;
