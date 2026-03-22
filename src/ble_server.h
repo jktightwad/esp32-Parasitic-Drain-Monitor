@@ -8,10 +8,9 @@
 #include "esp_task_wdt.h"
 
 // ===== OTA RECEIVE STATE =====
-static volatile size_t bleOtaReceived  = 0;
+static volatile size_t bleOtaReceived   = 0;
 static volatile int    bleOtaChunkCount = 0;
-static NimBLERemoteCharacteristic* bleOtaDeviceIdChar = nullptr;  // for sending ACKs
-static const int OTA_ACK_WINDOW = 20;
+static const int       OTA_ACK_WINDOW   = 20;
 
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
@@ -20,12 +19,7 @@ static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
   Update.write(data, length);
   bleOtaReceived += length;
   bleOtaChunkCount++;
-
-  // Send ACK every window so collector knows it can send more
-  if (bleOtaChunkCount % OTA_ACK_WINDOW == 0 && bleOtaDeviceIdChar != nullptr) {
-    String ack = "ACK:" + String(bleOtaChunkCount);
-    bleOtaDeviceIdChar->writeValue(ack.c_str(), true);
-  }
+  // ACK is sent from main task loop — never from inside a callback
 }
 
 // ===== LOAD PENDING RECORDS =====
@@ -114,7 +108,6 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
 
   bleOtaReceived   = 0;
   bleOtaChunkCount = 0;
-  bleOtaDeviceIdChar = deviceIdChar;  // store for ACK sending in callback
 
   if (!otaDataChar->canNotify()) {
     Serial.println("BLE OTA: Cannot subscribe");
@@ -127,26 +120,42 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
   otaDataChar->subscribe(true, bleOtaDataCallback);
   Serial.println("BLE OTA: Subscribed");
 
+  // Signal collector to start streaming
   deviceIdChar->writeValue("OTA_READY", true);
   Serial.println("BLE OTA: Sent OTA_READY — waiting for firmware...");
 
-  unsigned long otaStart = millis();
-  unsigned long lastLog  = millis();
-  unsigned long lastWdog = millis();
+  unsigned long otaStart    = millis();
+  unsigned long lastLog     = millis();
+  unsigned long lastWdog    = millis();
+  int           lastAcked   = 0;
 
   while (bleOtaReceived < firmwareSize &&
          millis() - otaStart < 360000UL &&
          client->isConnected()) {
+
     if (millis() - lastWdog > 5000) {
       esp_task_wdt_reset();
       lastWdog = millis();
     }
+
+    // Send ACK from main task every OTA_ACK_WINDOW chunks
+    int currentChunk = bleOtaChunkCount;
+    if (currentChunk > 0 &&
+        currentChunk % OTA_ACK_WINDOW == 0 &&
+        currentChunk != lastAcked) {
+      String ack = "ACK:" + String(currentChunk);
+      deviceIdChar->writeValue(ack.c_str(), true);
+      lastAcked = currentChunk;
+      Serial.println("BLE OTA: ACK " + String(currentChunk));
+    }
+
     if (millis() - lastLog > 10000) {
       Serial.println("BLE OTA: " +
                      String(bleOtaReceived * 100 / firmwareSize) + "% (" +
                      String(bleOtaReceived) + "/" + String(firmwareSize) + ")");
       lastLog = millis();
     }
+
     delay(10);
   }
 
@@ -205,14 +214,13 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
           uint8_t pat = (uint8_t)mfData[4];
           uint32_t sz = 0;
           memcpy(&sz, &mfData[5], 4);
-          // Build version string and compare to our version
           char advVer[16];
           snprintf(advVer, sizeof(advVer), "%d.%d.%d", maj, min, pat);
           Serial.println("BLE: Advert OTA version: " + String(advVer) +
                          " ours: " + String(VOLTMON_VERSION));
           if (String(advVer) != String(VOLTMON_VERSION) && sz > 0) {
             otaSize = (size_t)sz;
-            Serial.println("BLE: OTA needed — advert size: " + String(otaSize));
+            Serial.println("BLE: OTA needed — size: " + String(otaSize));
           } else {
             Serial.println("BLE: OTA not needed — already on " + String(VOLTMON_VERSION));
           }
@@ -288,7 +296,7 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   NimBLEDevice::deleteClient(client);
   Serial.println("BLE: Transfer done — success: " + String(transferOk));
 
-  // OTA size came from advertising packet — no characteristic read needed
+  // OTA if version differs from ours (detected during scan)
   if (otaSize > 0) {
     Serial.println("BLE OTA: Starting dedicated OTA connection...");
     delay(500);
