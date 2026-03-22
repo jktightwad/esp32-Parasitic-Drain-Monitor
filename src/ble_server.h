@@ -8,20 +8,14 @@
 #include "esp_task_wdt.h"
 
 // ===== OTA RECEIVE STATE =====
-static volatile size_t bleOtaReceived    = 0;
-static volatile bool   bleOtaChunkReady  = false;
-static uint8_t         bleOtaChunkBuf[512];
-static size_t          bleOtaChunkLen    = 0;
+static volatile size_t bleOtaReceived = 0;
 
+// Indication callback — fires when each indicated chunk is received and ACK'd
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
   if (length == 0) return;
-  // Copy chunk to buffer for main task to process
-  if (length <= sizeof(bleOtaChunkBuf)) {
-    memcpy(bleOtaChunkBuf, data, length);
-    bleOtaChunkLen   = length;
-    bleOtaChunkReady = true;
-  }
+  Update.write(data, length);
+  bleOtaReceived += length;
 }
 
 // ===== LOAD PENDING RECORDS =====
@@ -42,9 +36,7 @@ static String loadPendingRecords() {
   return content;
 }
 
-// ===== DEDICATED OTA CONNECTION — PULL MODEL =====
-// VoltMon requests each chunk by writing "NEXT" to deviceIdChar
-// Collector sends one chunk per request — guaranteed delivery, no drops
+// ===== DEDICATED OTA CONNECTION =====
 static void doBLEOtaTransfer(size_t firmwareSize) {
   Serial.println("BLE OTA: Connecting...");
 
@@ -101,6 +93,7 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
     return;
   }
 
+  // Extended supervision timeout for long transfer
   client->setConnectionParams(12, 12, 0, 600);
 
   if (!Update.begin(firmwareSize)) {
@@ -110,73 +103,44 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
     return;
   }
 
-  bleOtaReceived   = 0;
-  bleOtaChunkReady = false;
+  bleOtaReceived = 0;
 
-  if (!otaDataChar->canNotify()) {
-    Serial.println("BLE OTA: Cannot subscribe");
+  // Subscribe to INDICATIONS (not notifications)
+  // indicate() on collector side blocks until VoltMon ACKs — guaranteed delivery
+  if (!otaDataChar->canIndicate()) {
+    Serial.println("BLE OTA: Cannot subscribe to indications");
     Update.abort();
     client->disconnect();
     NimBLEDevice::deleteClient(client);
     return;
   }
 
-  otaDataChar->subscribe(true, bleOtaDataCallback);
-  Serial.println("BLE OTA: Subscribed");
+  // subscribe(false, ...) = indications, (true, ...) = notifications
+  otaDataChar->subscribe(false, bleOtaDataCallback);
+  Serial.println("BLE OTA: Subscribed to indications");
 
-  // Signal OTA_READY — collector enters pull mode waiting for NEXT requests
+  // Signal collector to start streaming
   deviceIdChar->writeValue("OTA_READY", true);
-  Serial.println("BLE OTA: Sent OTA_READY — pulling firmware...");
+  Serial.println("BLE OTA: Sent OTA_READY — waiting for firmware...");
 
-  unsigned long otaStart   = millis();
-  unsigned long lastLog    = millis();
-  unsigned long lastWdog   = millis();
-  unsigned long chunkStart = millis();
-
-  // Request first chunk
-  deviceIdChar->writeValue("NEXT", true);
+  unsigned long otaStart = millis();
+  unsigned long lastLog  = millis();
+  unsigned long lastWdog = millis();
 
   while (bleOtaReceived < firmwareSize &&
          millis() - otaStart < 360000UL &&
          client->isConnected()) {
-
     if (millis() - lastWdog > 5000) {
       esp_task_wdt_reset();
       lastWdog = millis();
     }
-
-    if (bleOtaChunkReady) {
-      size_t chunkLen  = bleOtaChunkLen;
-      bleOtaChunkReady = false;
-      chunkStart       = millis();
-
-      // Request next chunk BEFORE writing to flash — pipeline overlap
-      // Collector prepares next chunk while VoltMon writes current one
-      size_t projectedReceived = bleOtaReceived + chunkLen;
-      if (projectedReceived < firmwareSize) {
-        deviceIdChar->writeValue("NEXT", true);
-      }
-
-      // Now write to flash
-      Update.write(bleOtaChunkBuf, chunkLen);
-      bleOtaReceived += chunkLen;
-    }
-
-    // Timeout waiting for chunk
-    if (!bleOtaChunkReady && millis() - chunkStart > 5000 && bleOtaReceived < firmwareSize) {
-      Serial.println("BLE OTA: Chunk timeout at " + String(bleOtaReceived) + " — retrying");
-      deviceIdChar->writeValue("NEXT", true);
-      chunkStart = millis();
-    }
-
     if (millis() - lastLog > 10000) {
       Serial.println("BLE OTA: " +
                      String(bleOtaReceived * 100 / firmwareSize) + "% (" +
                      String(bleOtaReceived) + "/" + String(firmwareSize) + ")");
       lastLog = millis();
     }
-
-    delay(1);
+    delay(5);
   }
 
   if (bleOtaReceived >= firmwareSize) {
@@ -222,7 +186,6 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     if (name == "VoltMon-Collector") {
       collector = new NimBLEAdvertisedDevice(device);
 
-      // Read OTA version+size from manufacturer data
       std::string mfData = device.getManufacturerData();
       if (mfData.length() >= 9) {
         uint8_t id0 = (uint8_t)mfData[0];
@@ -282,13 +245,12 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   NimBLERemoteCharacteristic* deviceIdChar = service->getCharacteristic(BLE_DEVICE_ID_CHAR_UUID);
 
   if (!recordsChar || !deviceIdChar) {
-    Serial.println("BLE: Required characteristics not found!");
+    Serial.println("BLE: Required characteristics not found");
     client->disconnect();
     NimBLEDevice::deleteClient(client);
     return false;
   }
 
-  // Send device ID + version
   String deviceIdPayload = String(cfg.deviceName) + ":" + String(VOLTMON_VERSION);
   deviceIdChar->writeValue(deviceIdPayload.c_str(), true);
 

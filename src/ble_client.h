@@ -240,10 +240,10 @@ void collectorBleInit() {
   );
   collectorConfirmChar->setValue("");
 
-  // OTA data — collector notifies VoltMon with firmware chunks
+  // OTA data — collector indicates VoltMon with firmware chunks (indication = guaranteed delivery)
   collectorOtaChar = service->createCharacteristic(
     BLE_OTA_CHAR_UUID,
-    NIMBLE_PROPERTY::NOTIFY
+    NIMBLE_PROPERTY::INDICATE
   );
   collectorOtaChar->setValue("");
 

@@ -300,6 +300,13 @@ void streamOTAToVoltMon() {
   Serial.println("OTA stream: Opening HTTP stream...");
   setActivityLED(COLOR_PURPLE);
 
+  // Ensure WiFi is solid before long HTTP stream
+  maintainWiFi();
+  if (!wifiConnected) {
+    Serial.println("OTA stream: WiFi not available — aborting");
+    return;
+  }
+
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
 
@@ -330,42 +337,24 @@ void streamOTAToVoltMon() {
     return;
   }
 
-  Serial.println("OTA stream: VoltMon ready — pull mode");
+  Serial.println("OTA stream: VoltMon ready — starting indicate stream");
 
   WiFiClient* stream = http.getStreamPtr();
 
-  // Buffer the entire firmware into memory in chunks
-  // Pull model: wait for NEXT request before sending each chunk
-  const size_t CHUNK_SIZE = 490;
+  // indicate() blocks until VoltMon acknowledges each chunk — guaranteed delivery
+  const size_t CHUNK_SIZE = 480;
   uint8_t      buf[CHUNK_SIZE];
   size_t       totalSent     = 0;
   unsigned long lastWdog     = millis();
   unsigned long lastProgress = millis();
 
-  bleOtaClearNext();
-
   while (http.connected() && totalSent < (size_t)contentLength && collectorConnected) {
-
-    // Wait for VoltMon to request next chunk
-    unsigned long nextWait = millis();
-    while (!bleOtaNextRequested() && collectorConnected && millis() - nextWait < 3000) {
-      feedWatchdog();
-      delay(1);
-    }
-
-    if (!bleOtaNextRequested()) {
-      Serial.println("OTA stream: NEXT timeout at " + String(totalSent));
-      break;
-    }
-    bleOtaClearNext();
-
-    // Read chunk from HTTP stream
     size_t remaining = (size_t)contentLength - totalSent;
     size_t toRead    = min(remaining, CHUNK_SIZE);
     size_t bytesRead = 0;
     unsigned long readStart = millis();
 
-    while (bytesRead < toRead && millis() - readStart < 3000) {
+    while (bytesRead < toRead && millis() - readStart < 5000) {
       if (stream->available()) {
         bytesRead += stream->readBytes(buf + bytesRead, toRead - bytesRead);
       } else {
@@ -374,13 +363,13 @@ void streamOTAToVoltMon() {
     }
 
     if (bytesRead == 0) {
-      Serial.println("OTA stream: read failed at " + String(totalSent));
+      Serial.println("OTA stream: HTTP read failed at " + String(totalSent));
       break;
     }
 
-    // Send chunk
+    // indicate() waits for BLE acknowledgment before returning — no drops possible
     collectorOtaChar->setValue(buf, bytesRead);
-    collectorOtaChar->notify();
+    collectorOtaChar->indicate();
     totalSent += bytesRead;
 
     if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
