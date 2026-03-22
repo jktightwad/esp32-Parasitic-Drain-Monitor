@@ -212,6 +212,9 @@ void maintainWiFi() {
     delay(1000);
     if (connectWiFi() && cachedVoltMonVersion.length() == 0) {
       checkVoltMonFirmwareVersion();
+      if (cachedVoltMonVersion.length() > 0) {
+        bleUpdateAdvertising();
+      }
     }
   }
 }
@@ -241,8 +244,7 @@ void checkVoltMonFirmwareVersion() {
   secureClient.setInsecure();
 
   HTTPClient http;
-  String versionUrl = String(VOLTMON_OTA_VERSION_URL) + "?t=" + String(millis());
-  http.begin(secureClient, versionUrl);
+  http.begin(secureClient, VOLTMON_OTA_VERSION_URL);
   http.setTimeout(10000);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
@@ -304,35 +306,7 @@ void streamOTAToVoltMon() {
                  bleOtaTargetDevice());
   setActivityLED(COLOR_PURPLE);
 
- // Wait for VoltMon OTA_READY FIRST — connection params negotiated before HTTP open
-  Serial.println("OTA stream: waiting for VoltMon OTA_READY signal...");
-  bleOtaClearReady();
-  unsigned long readyWait    = millis();
-  unsigned long lastKeepAlive = millis();
-  uint8_t keepAliveByte = 0;
-  while (!bleOtaReadyReceived() && collectorConnected && millis() - readyWait < 10000) {
-    feedWatchdog();
-    if (millis() - lastKeepAlive > 200) {
-      collectorOtaChar->setValue(&keepAliveByte, 1);
-      collectorOtaChar->notify();
-      lastKeepAlive = millis();
-    }
-    delay(20);
-  }
-
-  if (!bleOtaReadyReceived()) {
-    Serial.println("OTA stream: VoltMon never sent OTA_READY — aborting");
-    return;
-  }
-
-  if (!collectorConnected) {
-    Serial.println("OTA stream: VoltMon disconnected waiting for OTA_READY");
-    return;
-  }
-
-  Serial.println("OTA stream: OTA_READY received — opening firmware stream...");
-
-  // NOW open HTTP — extended BLE timeout is already negotiated and in effect
+  // Open HTTP stream FIRST before any delay — minimizes gap where BLE is idle
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
 
@@ -354,6 +328,29 @@ void streamOTAToVoltMon() {
 
   int contentLength = http.getSize();
   Serial.println("OTA stream: content-length=" + String(contentLength));
+
+  // Wait for VoltMon to signal OTA_READY (subscribed and Update.begin() called)
+  Serial.println("OTA stream: waiting for VoltMon OTA_READY signal...");
+  bleOtaClearReady();
+  unsigned long readyWait = millis();
+  while (!bleOtaReadyReceived() && collectorConnected && millis() - readyWait < 10000) {
+    feedWatchdog();
+    delay(50);
+  }
+
+  if (!bleOtaReadyReceived()) {
+    Serial.println("OTA stream: VoltMon never sent OTA_READY — aborting");
+    http.end();
+    return;
+  }
+
+  if (!collectorConnected) {
+    Serial.println("OTA stream: VoltMon disconnected waiting for OTA_READY");
+    http.end();
+    return;
+  }
+
+  Serial.println("OTA stream: OTA_READY received — starting stream");
 
   WiFiClient* stream = http.getStreamPtr();
 
@@ -436,11 +433,16 @@ void streamOTAToVoltMon() {
 void bufferRecords(const String& deviceId, const String& records) {
   if (deviceId.length() == 0 || records.length() == 0) return;
 
-    File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a", true);
-    if (!f) {
-        Serial.println("ERROR: Cannot open collector pending for write");
-        return;
-    }
+  if (!LittleFS.exists(COLLECTOR_PENDING_FILE)) {
+    File init = LittleFS.open(COLLECTOR_PENDING_FILE, "w");
+    if (init) init.close();
+  }
+
+  File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a");
+  if (!f) {
+    Serial.println("ERROR: Cannot open collector pending for write");
+    return;
+  }
 
   int start   = 0;
   int written = 0;
@@ -535,15 +537,9 @@ bool uploadBuffered() {
     http.setTimeout(15000);
     http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
-// Send keep-alive to VoltMon while HTTP connects
-  uint8_t keepByte = 0;
-  collectorOtaChar->setValue(&keepByte, 1);
-  collectorOtaChar->notify();
-  feedWatchdog();
-  int httpCode = http.GET();
-  feedWatchdog();
-  collectorOtaChar->setValue(&keepByte, 1);
-  collectorOtaChar->notify();
+    feedWatchdog();
+    int httpCode = http.GET();
+    feedWatchdog();
 
     String response = http.getString();
     http.end();
@@ -780,6 +776,10 @@ void setup() {
   }
 
   collectorBleInit();
+  // Update advertising name with OTA info if available
+  if (cachedVoltMonVersion.length() > 0) {
+    bleUpdateAdvertising();
+  }
 
   Serial.println("Collector ready — waiting for VoltMon");
   if (cachedVoltMonVersion.length() > 0) {
@@ -807,13 +807,13 @@ void loop() {
 
     bleClearReceived();
 
-    // ===== OTA STREAM FIRST — VoltMon is still connected waiting =====
+    // ===== OTA STREAM — triggered by VoltMon's dedicated second connection =====
+    // VoltMon reconnects and sends OTA_READY, DeviceIdCallbacks sets otaStreamPending
     if (bleOtaStreamPending() && collectorConnected && wifiConnected) {
       Serial.println("OTA stream: starting firmware stream to " + bleOtaTargetDevice());
       streamOTAToVoltMon();
       bleOtaClearPending();
       setActivityLED(COLOR_DIM_BLUE);
-      // VoltMon reboots after OTA — skip record upload this cycle
       return;
     } else if (bleOtaStreamPending()) {
       Serial.println("OTA stream: skipped — connected:" + String(collectorConnected) +
@@ -850,11 +850,10 @@ void loop() {
   }
 
   // Retry buffered uploads
-static unsigned long lastUploadRetry = 0;
+  static unsigned long lastUploadRetry = 0;
   if (wifiConnected && hasPendingBuffer) {
     if (millis() - lastUploadRetry > COLLECTOR_UPLOAD_RETRY_MS) {
       Serial.println("Retrying buffered upload...");
-      maintainWiFi();
       setActivityLED(COLOR_CYAN);
       uploadBuffered();
       setActivityLED(COLOR_DIM_BLUE);
@@ -872,7 +871,11 @@ static unsigned long lastUploadRetry = 0;
   // Check VoltMon firmware version every hour
   static unsigned long lastVoltMonVersionCheck = 0;
   if (wifiConnected && millis() - lastVoltMonVersionCheck > 3600000UL) {
+    String prevVersion = cachedVoltMonVersion;
     checkVoltMonFirmwareVersion();
+    if (cachedVoltMonVersion != prevVersion) {
+      bleUpdateAdvertising();
+    }
     lastVoltMonVersionCheck = millis();
   }
 
