@@ -146,16 +146,20 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
     }
 
     if (bleOtaChunkReady) {
-      // Write chunk to flash
-      Update.write(bleOtaChunkBuf, bleOtaChunkLen);
-      bleOtaReceived  += bleOtaChunkLen;
+      size_t chunkLen  = bleOtaChunkLen;
       bleOtaChunkReady = false;
       chunkStart       = millis();
 
-      // Request next chunk
-      if (bleOtaReceived < firmwareSize) {
+      // Request next chunk BEFORE writing to flash — pipeline overlap
+      // Collector prepares next chunk while VoltMon writes current one
+      size_t projectedReceived = bleOtaReceived + chunkLen;
+      if (projectedReceived < firmwareSize) {
         deviceIdChar->writeValue("NEXT", true);
       }
+
+      // Now write to flash
+      Update.write(bleOtaChunkBuf, chunkLen);
+      bleOtaReceived += chunkLen;
     }
 
     // Timeout waiting for chunk

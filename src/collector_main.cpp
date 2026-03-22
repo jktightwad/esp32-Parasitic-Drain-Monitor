@@ -336,7 +336,7 @@ void streamOTAToVoltMon() {
 
   // Buffer the entire firmware into memory in chunks
   // Pull model: wait for NEXT request before sending each chunk
-  const size_t CHUNK_SIZE = 480;
+  const size_t CHUNK_SIZE = 490;
   uint8_t      buf[CHUNK_SIZE];
   size_t       totalSent     = 0;
   unsigned long lastWdog     = millis();
@@ -348,7 +348,7 @@ void streamOTAToVoltMon() {
 
     // Wait for VoltMon to request next chunk
     unsigned long nextWait = millis();
-    while (!bleOtaNextRequested() && collectorConnected && millis() - nextWait < 10000) {
+    while (!bleOtaNextRequested() && collectorConnected && millis() - nextWait < 3000) {
       feedWatchdog();
       delay(1);
     }
