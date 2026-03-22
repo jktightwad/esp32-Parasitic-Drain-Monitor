@@ -330,29 +330,58 @@ void streamOTAToVoltMon() {
     return;
   }
 
-  Serial.println("OTA stream: VoltMon ready — starting stream");
+  Serial.println("OTA stream: VoltMon ready — pull mode");
 
   WiFiClient* stream = http.getStreamPtr();
 
-  const size_t CHUNK_SIZE = 480;  // max useful at 512 MTU
+  // Buffer the entire firmware into memory in chunks
+  // Pull model: wait for NEXT request before sending each chunk
+  const size_t CHUNK_SIZE = 480;
   uint8_t      buf[CHUNK_SIZE];
   size_t       totalSent     = 0;
   unsigned long lastWdog     = millis();
   unsigned long lastProgress = millis();
 
+  bleOtaClearNext();
+
   while (http.connected() && totalSent < (size_t)contentLength && collectorConnected) {
-    size_t available = stream->available();
-    if (available == 0) { delay(2); continue; }
 
-    size_t toRead    = min(available, CHUNK_SIZE);
-    size_t bytesRead = stream->readBytes(buf, toRead);
-    if (bytesRead == 0) continue;
+    // Wait for VoltMon to request next chunk
+    unsigned long nextWait = millis();
+    while (!bleOtaNextRequested() && collectorConnected && millis() - nextWait < 10000) {
+      feedWatchdog();
+      delay(1);
+    }
 
+    if (!bleOtaNextRequested()) {
+      Serial.println("OTA stream: NEXT timeout at " + String(totalSent));
+      break;
+    }
+    bleOtaClearNext();
+
+    // Read chunk from HTTP stream
+    size_t remaining = (size_t)contentLength - totalSent;
+    size_t toRead    = min(remaining, CHUNK_SIZE);
+    size_t bytesRead = 0;
+    unsigned long readStart = millis();
+
+    while (bytesRead < toRead && millis() - readStart < 3000) {
+      if (stream->available()) {
+        bytesRead += stream->readBytes(buf + bytesRead, toRead - bytesRead);
+      } else {
+        delay(1);
+      }
+    }
+
+    if (bytesRead == 0) {
+      Serial.println("OTA stream: read failed at " + String(totalSent));
+      break;
+    }
+
+    // Send chunk
     collectorOtaChar->setValue(buf, bytesRead);
     collectorOtaChar->notify();
     totalSent += bytesRead;
-
-    delay(15);  // pacing — allow BLE stack time to queue and send
 
     if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
 

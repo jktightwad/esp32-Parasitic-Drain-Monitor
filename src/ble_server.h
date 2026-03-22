@@ -8,14 +8,20 @@
 #include "esp_task_wdt.h"
 
 // ===== OTA RECEIVE STATE =====
-static volatile size_t bleOtaReceived = 0;
+static volatile size_t bleOtaReceived    = 0;
+static volatile bool   bleOtaChunkReady  = false;
+static uint8_t         bleOtaChunkBuf[512];
+static size_t          bleOtaChunkLen    = 0;
 
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
   if (length == 0) return;
-  if (length == 1 && data[0] == 0x00) return;  // keep-alive
-  Update.write(data, length);
-  bleOtaReceived += length;
+  // Copy chunk to buffer for main task to process
+  if (length <= sizeof(bleOtaChunkBuf)) {
+    memcpy(bleOtaChunkBuf, data, length);
+    bleOtaChunkLen   = length;
+    bleOtaChunkReady = true;
+  }
 }
 
 // ===== LOAD PENDING RECORDS =====
@@ -36,7 +42,9 @@ static String loadPendingRecords() {
   return content;
 }
 
-// ===== DEDICATED OTA CONNECTION =====
+// ===== DEDICATED OTA CONNECTION — PULL MODEL =====
+// VoltMon requests each chunk by writing "NEXT" to deviceIdChar
+// Collector sends one chunk per request — guaranteed delivery, no drops
 static void doBLEOtaTransfer(size_t firmwareSize) {
   Serial.println("BLE OTA: Connecting...");
 
@@ -102,7 +110,8 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
     return;
   }
 
-  bleOtaReceived = 0;
+  bleOtaReceived   = 0;
+  bleOtaChunkReady = false;
 
   if (!otaDataChar->canNotify()) {
     Serial.println("BLE OTA: Cannot subscribe");
@@ -115,13 +124,17 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
   otaDataChar->subscribe(true, bleOtaDataCallback);
   Serial.println("BLE OTA: Subscribed");
 
-  // Signal collector to start streaming
+  // Signal OTA_READY — collector enters pull mode waiting for NEXT requests
   deviceIdChar->writeValue("OTA_READY", true);
-  Serial.println("BLE OTA: Sent OTA_READY — waiting for firmware...");
+  Serial.println("BLE OTA: Sent OTA_READY — pulling firmware...");
 
-  unsigned long otaStart = millis();
-  unsigned long lastLog  = millis();
-  unsigned long lastWdog = millis();
+  unsigned long otaStart   = millis();
+  unsigned long lastLog    = millis();
+  unsigned long lastWdog   = millis();
+  unsigned long chunkStart = millis();
+
+  // Request first chunk
+  deviceIdChar->writeValue("NEXT", true);
 
   while (bleOtaReceived < firmwareSize &&
          millis() - otaStart < 360000UL &&
@@ -132,6 +145,26 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
       lastWdog = millis();
     }
 
+    if (bleOtaChunkReady) {
+      // Write chunk to flash
+      Update.write(bleOtaChunkBuf, bleOtaChunkLen);
+      bleOtaReceived  += bleOtaChunkLen;
+      bleOtaChunkReady = false;
+      chunkStart       = millis();
+
+      // Request next chunk
+      if (bleOtaReceived < firmwareSize) {
+        deviceIdChar->writeValue("NEXT", true);
+      }
+    }
+
+    // Timeout waiting for chunk
+    if (!bleOtaChunkReady && millis() - chunkStart > 5000 && bleOtaReceived < firmwareSize) {
+      Serial.println("BLE OTA: Chunk timeout at " + String(bleOtaReceived) + " — retrying");
+      deviceIdChar->writeValue("NEXT", true);
+      chunkStart = millis();
+    }
+
     if (millis() - lastLog > 10000) {
       Serial.println("BLE OTA: " +
                      String(bleOtaReceived * 100 / firmwareSize) + "% (" +
@@ -139,7 +172,7 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
       lastLog = millis();
     }
 
-    delay(5);
+    delay(1);
   }
 
   if (bleOtaReceived >= firmwareSize) {
@@ -186,16 +219,15 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
       collector = new NimBLEAdvertisedDevice(device);
 
       // Read OTA version+size from manufacturer data
-      // Format: 0xFFFF (2 bytes) + major,minor,patch (3 bytes) + size (4 bytes)
       std::string mfData = device.getManufacturerData();
       if (mfData.length() >= 9) {
         uint8_t id0 = (uint8_t)mfData[0];
         uint8_t id1 = (uint8_t)mfData[1];
         if (id0 == 0xFF && id1 == 0xFF) {
-          uint8_t maj = (uint8_t)mfData[2];
-          uint8_t min = (uint8_t)mfData[3];
-          uint8_t pat = (uint8_t)mfData[4];
-          uint32_t sz = 0;
+          uint8_t  maj = (uint8_t)mfData[2];
+          uint8_t  min = (uint8_t)mfData[3];
+          uint8_t  pat = (uint8_t)mfData[4];
+          uint32_t sz  = 0;
           memcpy(&sz, &mfData[5], 4);
           char advVer[16];
           snprintf(advVer, sizeof(advVer), "%d.%d.%d", maj, min, pat);
@@ -279,7 +311,6 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   NimBLEDevice::deleteClient(client);
   Serial.println("BLE: Transfer done — success: " + String(transferOk));
 
-  // OTA if version differs from ours (detected during scan)
   if (otaSize > 0) {
     Serial.println("BLE OTA: Starting dedicated OTA connection...");
     delay(500);

@@ -25,6 +25,7 @@ static bool   collectorDataReceived = false;
 static bool   otaStreamPending      = false;
 static bool   otaReadyReceived      = false;
 static volatile bool   otaAckReceived       = false;
+static volatile bool   otaNextRequested     = false;
 static String otaTargetDevice       = "";
 
 static String receivedDeviceId      = "";
@@ -83,9 +84,9 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
       return;
     }
 
-    // Flow control ACK from VoltMon during OTA stream
-    if (s.startsWith("ACK:")) {
-      otaAckReceived = true;
+    // Pull model: VoltMon requests next chunk
+    if (s == "NEXT") {
+      otaNextRequested = true;
       return;
     }
 
@@ -319,6 +320,8 @@ bool   bleOtaReadyReceived() { return otaReadyReceived; }
 void   bleOtaClearReady()    { otaReadyReceived = false; }
 bool   bleOtaAckReceived()   { return otaAckReceived; }
 void   bleOtaClearAck()      { otaAckReceived = false; }
+bool   bleOtaNextRequested() { return otaNextRequested; }
+void   bleOtaClearNext()     { otaNextRequested = false; }
 String bleOtaTargetDevice()  { return otaTargetDevice; }
 
 void bleClearReceived() {
