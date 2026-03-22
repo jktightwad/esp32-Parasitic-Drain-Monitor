@@ -72,10 +72,15 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
     String s = String(val.c_str());
     s.trim();
 
-    // Check for OTA_READY signal from VoltMon
+    // Check for OTA_READY signal from VoltMon — second dedicated OTA connection
     if (s == "OTA_READY") {
-      Serial.println("BLE: VoltMon OTA_READY received");
+      Serial.println("BLE: VoltMon OTA_READY — starting stream immediately");
       otaReadyReceived = true;
+      // Set otaStreamPending so loop() triggers the stream right away
+      if (cachedFirmwareSize > 0) {
+        otaStreamPending = true;
+        otaTargetDevice  = receivedDeviceId.length() > 0 ? receivedDeviceId : "VoltMon";
+      }
       return;
     }
 
