@@ -357,11 +357,15 @@ void streamOTAToVoltMon() {
 
   WiFiClient* stream = http.getStreamPtr();
 
-  const size_t CHUNK_SIZE = 480;
+  const size_t CHUNK_SIZE  = 200;   // small chunks to avoid BLE queue overflow
+  const int    ACK_WINDOW  = 20;    // VoltMon ACKs every N chunks
   uint8_t      buf[CHUNK_SIZE];
-  size_t       totalSent     = 0;
-  unsigned long lastWdog     = millis();
+  size_t       totalSent   = 0;
+  int          chunkCount  = 0;
+  unsigned long lastWdog   = millis();
   unsigned long lastProgress = millis();
+
+  bleOtaClearAck();
 
   while (http.connected() && totalSent < (size_t)contentLength && collectorConnected) {
     size_t available = stream->available();
@@ -374,8 +378,23 @@ void streamOTAToVoltMon() {
     collectorOtaChar->setValue(buf, bytesRead);
     collectorOtaChar->notify();
     totalSent += bytesRead;
+    chunkCount++;
 
     delay(30);
+
+    // Wait for ACK every window — flow control to prevent BLE queue overflow
+    if (chunkCount % ACK_WINDOW == 0) {
+      bleOtaClearAck();
+      unsigned long ackWait = millis();
+      while (!bleOtaAckReceived() && millis() - ackWait < 3000 && collectorConnected) {
+        feedWatchdog();
+        delay(10);
+      }
+      if (!bleOtaAckReceived()) {
+        Serial.println("OTA stream: ACK timeout at " + String(totalSent) + " bytes");
+        break;
+      }
+    }
 
     if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
 

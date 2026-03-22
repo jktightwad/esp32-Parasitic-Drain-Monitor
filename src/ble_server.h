@@ -8,7 +8,10 @@
 #include "esp_task_wdt.h"
 
 // ===== OTA RECEIVE STATE =====
-static volatile size_t bleOtaReceived = 0;
+static volatile size_t bleOtaReceived  = 0;
+static volatile int    bleOtaChunkCount = 0;
+static NimBLERemoteCharacteristic* bleOtaDeviceIdChar = nullptr;  // for sending ACKs
+static const int OTA_ACK_WINDOW = 20;
 
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
@@ -16,6 +19,13 @@ static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
   if (length == 1 && data[0] == 0x00) return;  // keep-alive
   Update.write(data, length);
   bleOtaReceived += length;
+  bleOtaChunkCount++;
+
+  // Send ACK every window so collector knows it can send more
+  if (bleOtaChunkCount % OTA_ACK_WINDOW == 0 && bleOtaDeviceIdChar != nullptr) {
+    String ack = "ACK:" + String(bleOtaChunkCount);
+    bleOtaDeviceIdChar->writeValue(ack.c_str(), false);  // no response needed
+  }
 }
 
 // ===== LOAD PENDING RECORDS =====
@@ -102,7 +112,9 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
     return;
   }
 
-  bleOtaReceived = 0;
+  bleOtaReceived   = 0;
+  bleOtaChunkCount = 0;
+  bleOtaDeviceIdChar = deviceIdChar;  // store for ACK sending in callback
 
   if (!otaDataChar->canNotify()) {
     Serial.println("BLE OTA: Cannot subscribe");

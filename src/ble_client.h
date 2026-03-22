@@ -24,6 +24,7 @@ static bool   collectorConnected    = false;
 static bool   collectorDataReceived = false;
 static bool   otaStreamPending      = false;
 static bool   otaReadyReceived      = false;
+static volatile bool   otaAckReceived       = false;
 static String otaTargetDevice       = "";
 
 static String receivedDeviceId      = "";
@@ -75,11 +76,16 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
     if (s == "OTA_READY") {
       Serial.println("BLE: VoltMon OTA_READY — starting stream immediately");
       otaReadyReceived = true;
-      // Set otaStreamPending so loop() triggers the stream right away
       if (cachedFirmwareSize > 0) {
         otaStreamPending = true;
         otaTargetDevice  = receivedDeviceId.length() > 0 ? receivedDeviceId : "VoltMon";
       }
+      return;
+    }
+
+    // Flow control ACK from VoltMon during OTA stream
+    if (s.startsWith("ACK:")) {
+      otaAckReceived = true;
       return;
     }
 
@@ -283,7 +289,7 @@ void bleSetOtaAvailable() {
 
   // Scan response carries service UUID so VoltMon can find service
   NimBLEAdvertisementData scanData;
-  scanData.addServiceUUID(BLE_SERVICE_UUID);
+  scanData.setCompleteServices(NimBLEUUID(BLE_SERVICE_UUID));
   advertising->setScanResponseData(scanData);
 
   advertising->start();
@@ -303,6 +309,8 @@ bool   bleOtaStreamPending() { return otaStreamPending; }
 void   bleOtaClearPending()  { otaStreamPending = false; otaTargetDevice = ""; }
 bool   bleOtaReadyReceived() { return otaReadyReceived; }
 void   bleOtaClearReady()    { otaReadyReceived = false; }
+bool   bleOtaAckReceived()   { return otaAckReceived; }
+void   bleOtaClearAck()      { otaAckReceived = false; }
 String bleOtaTargetDevice()  { return otaTargetDevice; }
 
 void bleClearReceived() {
