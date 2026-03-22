@@ -25,9 +25,13 @@ static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
 static void bleOtaCtrlCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
   if (length == 0) return;
-  bleOtaCtrlValue = String((char*)data).substring(0, length);
-  bleOtaCtrlValue.trim();
-  Serial.println("BLE OTA ctrl notify: [" + bleOtaCtrlValue + "]");
+  String val = String((char*)data).substring(0, length);
+  val.trim();
+  // Only accept known prefixes — ignore initial subscription notification garbage
+  if (val.startsWith("OTA_START:") || val.startsWith("OTA_PREPARE:")) {
+    bleOtaCtrlValue = val;
+    Serial.println("BLE OTA ctrl notify: [" + bleOtaCtrlValue + "]");
+  }
 }
 
 // ===== LOAD PENDING RECORDS =====
@@ -114,6 +118,7 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   bleOtaCtrlValue = "";
   if (otaCtrlChar && otaCtrlChar->canNotify()) {
     otaCtrlChar->subscribe(true, bleOtaCtrlCallback);
+    bleOtaCtrlValue = "";  // clear any garbage from initial subscription notification
     Serial.println("BLE: Subscribed to OTA ctrl notifications");
   }
 

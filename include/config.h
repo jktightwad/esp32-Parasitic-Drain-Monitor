@@ -3,7 +3,7 @@
 #include "secrets.h"
 
 // ===== VOLTMON VERSION =====
-#define VOLTMON_VERSION     "2.1.6"
+#define VOLTMON_VERSION     "2.1.7"
 
 // ===== COLLECTOR VERSION =====
 #define COLLECTOR_VERSION   "1.1.4"
