@@ -124,7 +124,7 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
       transferOk = true;
       Serial.println("BLE: Transfer accepted");
       // Non-blocking check for OTA signal piggybacked on confirm char
-      delay(300);
+      delay(1000);
       otaSignal = readOtaSignal(confirmChar);
       if (otaSignal.length() > 0) {
         Serial.println("BLE: OTA signal: " + otaSignal);
@@ -132,13 +132,13 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     } else {
       recordsChar->writeValue("EMPTY", true);
       transferOk = true;
-      delay(300);
+      delay(1000);
       otaSignal = readOtaSignal(confirmChar);
     }
   } else {
     recordsChar->writeValue("EMPTY", true);
     transferOk = true;
-    delay(300);
+    delay(1000);
     otaSignal = readOtaSignal(confirmChar);
   }
 
