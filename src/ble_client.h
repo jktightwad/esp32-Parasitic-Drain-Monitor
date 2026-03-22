@@ -266,12 +266,10 @@ void collectorBleInit() {
 
 // ===== UPDATE ADVERTISING WITH OTA INFO =====
 void bleUpdateAdvertising() {
-  // Encode OTA info in scan response name without tearing down the server
-  // Format: "VoltMon-Collector:version:size" or plain "VoltMon-Collector"
-  String advName = "VoltMon-Collector";
-  if (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0) {
-    advName += ":" + cachedVoltMonVersion + ":" + String(cachedFirmwareSize);
-  }
+  // Use short flag name to stay within BLE 31-byte advertising packet limit
+  String advName = (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0)
+                   ? "VoltMon-OTA"
+                   : "VoltMon-Collector";
 
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
   advertising->stop();

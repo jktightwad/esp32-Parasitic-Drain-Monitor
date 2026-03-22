@@ -297,16 +297,21 @@ void checkVoltMonFirmwareVersion() {
 
 // ===== STREAM OTA FIRMWARE TO VOLTMON OVER BLE =====
 void streamOTAToVoltMon() {
-  if (!collectorConnected) {
-    Serial.println("OTA stream: VoltMon disconnected before stream started");
-    return;
+  // VoltMon will disconnect from records connection then reconnect for OTA
+  // Wait for it to disconnect first if still connected
+  if (collectorConnected) {
+    Serial.println("OTA stream: waiting for VoltMon to disconnect before OTA reconnect...");
+    unsigned long waitDisconnect = millis();
+    while (collectorConnected && millis() - waitDisconnect < 5000) {
+      feedWatchdog();
+      delay(50);
+    }
   }
 
-  Serial.println("OTA stream: Starting — " + String(cachedFirmwareSize) + " bytes to " +
-                 bleOtaTargetDevice());
+  Serial.println("OTA stream: Opening HTTP stream...");
   setActivityLED(COLOR_PURPLE);
 
-  // Open HTTP stream FIRST before any delay — minimizes gap where BLE is idle
+  // Open HTTP stream while waiting for VoltMon to reconnect
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
 
@@ -329,28 +334,28 @@ void streamOTAToVoltMon() {
   int contentLength = http.getSize();
   Serial.println("OTA stream: content-length=" + String(contentLength));
 
-  // Wait for VoltMon to signal OTA_READY (subscribed and Update.begin() called)
-  Serial.println("OTA stream: waiting for VoltMon OTA_READY signal...");
+  // Wait for VoltMon to reconnect and send OTA_READY
+  Serial.println("OTA stream: waiting for VoltMon OTA reconnect...");
   bleOtaClearReady();
   unsigned long readyWait = millis();
-  while (!bleOtaReadyReceived() && collectorConnected && millis() - readyWait < 10000) {
+  while (!bleOtaReadyReceived() && millis() - readyWait < 30000) {
     feedWatchdog();
     delay(50);
   }
 
   if (!bleOtaReadyReceived()) {
-    Serial.println("OTA stream: VoltMon never sent OTA_READY — aborting");
+    Serial.println("OTA stream: VoltMon never reconnected — aborting");
     http.end();
     return;
   }
 
   if (!collectorConnected) {
-    Serial.println("OTA stream: VoltMon disconnected waiting for OTA_READY");
+    Serial.println("OTA stream: VoltMon disconnected after OTA_READY");
     http.end();
     return;
   }
 
-  Serial.println("OTA stream: OTA_READY received — starting stream");
+  Serial.println("OTA stream: VoltMon ready — starting stream");
 
   WiFiClient* stream = http.getStreamPtr();
 
