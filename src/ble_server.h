@@ -282,7 +282,7 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   NimBLERemoteCharacteristic* deviceIdChar = service->getCharacteristic(BLE_DEVICE_ID_CHAR_UUID);
 
   if (!recordsChar || !deviceIdChar) {
-    Serial.println("BLE: Required characteristics not found");
+    Serial.println("BLE: Required characteristics not found!");
     client->disconnect();
     NimBLEDevice::deleteClient(client);
     return false;
