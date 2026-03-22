@@ -266,60 +266,16 @@ void collectorBleInit() {
 
 // ===== UPDATE ADVERTISING WITH OTA INFO =====
 void bleUpdateAdvertising() {
-  // Encode OTA availability in device name: "VoltMon-Collector:version:size"
-  // or plain "VoltMon-Collector" when no OTA available
+  // Encode OTA info in scan response name without tearing down the server
+  // Format: "VoltMon-Collector:version:size" or plain "VoltMon-Collector"
   String advName = "VoltMon-Collector";
   if (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0) {
     advName += ":" + cachedVoltMonVersion + ":" + String(cachedFirmwareSize);
   }
 
-  NimBLEDevice::deinit(false);
-  NimBLEDevice::init(advName.c_str());
-  NimBLEDevice::setMTU(512);
-
-  // Re-create server and service
-  collectorBleServer = NimBLEDevice::createServer();
-  collectorBleServer->setCallbacks(new CollectorServerCallbacks());
-
-  NimBLEService* service = collectorBleServer->createService(BLE_SERVICE_UUID);
-
-  collectorDeviceIdChar = service->createCharacteristic(
-    BLE_DEVICE_ID_CHAR_UUID,
-    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::READ
-  );
-  collectorDeviceIdChar->setCallbacks(new DeviceIdCallbacks());
-  collectorDeviceIdChar->setValue("");
-
-  collectorRecordsChar = service->createCharacteristic(
-    BLE_RECORDS_CHAR_UUID,
-    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY
-  );
-  collectorRecordsChar->setCallbacks(new RecordsCallbacks());
-  collectorRecordsChar->setValue("");
-
-  collectorConfirmChar = service->createCharacteristic(
-    BLE_CONFIRM_CHAR_UUID,
-    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-  );
-  collectorConfirmChar->setValue("");
-
-  collectorOtaChar = service->createCharacteristic(
-    BLE_OTA_CHAR_UUID,
-    NIMBLE_PROPERTY::NOTIFY
-  );
-  collectorOtaChar->setValue("");
-
-  collectorOtaCtrlChar = service->createCharacteristic(
-    BLE_OTA_CTRL_CHAR_UUID,
-    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-  );
-  collectorOtaCtrlChar->setValue("");
-
-  service->start();
-
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
-  advertising->addServiceUUID(BLE_SERVICE_UUID);
-  advertising->setScanResponse(true);
+  advertising->stop();
+  NimBLEDevice::setDeviceName(advName.c_str());
   advertising->start();
 
   Serial.println("BLE: Advertising as: " + advName);
