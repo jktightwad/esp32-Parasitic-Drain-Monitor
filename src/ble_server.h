@@ -11,7 +11,7 @@
 static volatile size_t bleOtaReceived  = 0;
 static volatile bool   bleOtaDone      = false;
 static volatile bool   bleOtaSuccess   = false;
-static volatile String bleOtaCtrlValue = "";
+static String bleOtaCtrlValue = "";
 
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
