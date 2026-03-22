@@ -285,6 +285,7 @@ void checkVoltMonFirmwareVersion() {
       cachedFirmwareSize   = (size_t)size;
       Serial.println("VoltMon firmware cached: v" + cachedVoltMonVersion +
                      " size=" + String(cachedFirmwareSize) + " bytes");
+      bleSetOtaAvailable();
     } else {
       Serial.println("VoltMon firmware size unknown");
       http.end();
@@ -298,11 +299,10 @@ void checkVoltMonFirmwareVersion() {
 // ===== STREAM OTA FIRMWARE TO VOLTMON OVER BLE =====
 void streamOTAToVoltMon() {
   // VoltMon will disconnect from records connection then reconnect for OTA
-  // Wait for it to disconnect first if still connected
+  // Wait for disconnect if still connected
   if (collectorConnected) {
-    Serial.println("OTA stream: waiting for VoltMon to disconnect before OTA reconnect...");
-    unsigned long waitDisconnect = millis();
-    while (collectorConnected && millis() - waitDisconnect < 5000) {
+    unsigned long waitStart = millis();
+    while (collectorConnected && millis() - waitStart < 5000) {
       feedWatchdog();
       delay(50);
     }
@@ -311,7 +311,6 @@ void streamOTAToVoltMon() {
   Serial.println("OTA stream: Opening HTTP stream...");
   setActivityLED(COLOR_PURPLE);
 
-  // Open HTTP stream while waiting for VoltMon to reconnect
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
 
@@ -367,35 +366,24 @@ void streamOTAToVoltMon() {
 
   while (http.connected() && totalSent < (size_t)contentLength && collectorConnected) {
     size_t available = stream->available();
-    if (available == 0) {
-      delay(5);
-      continue;
-    }
+    if (available == 0) { delay(5); continue; }
 
     size_t toRead    = min(available, CHUNK_SIZE);
     size_t bytesRead = stream->readBytes(buf, toRead);
-
     if (bytesRead == 0) continue;
 
-    // Send chunk via BLE notification
     collectorOtaChar->setValue(buf, bytesRead);
     collectorOtaChar->notify();
     totalSent += bytesRead;
 
-    // Throttle to avoid BLE queue overflow
     delay(30);
 
-    if (millis() - lastWdog > 5000) {
-      feedWatchdog();
-      lastWdog = millis();
-    }
+    if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
 
     if (millis() - lastProgress > 10000) {
       int pct = (contentLength > 0) ? (totalSent * 100 / contentLength) : 0;
       Serial.println("OTA stream: " + String(pct) + "% (" +
                      String(totalSent) + "/" + String(contentLength) + ")");
-
-      // LED progress bar
       int ledsOn = (totalSent * LED_ACTIVITY_COUNT) / contentLength;
       for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
         strip.setPixelColor(i, (i - LED_ACTIVITY_START) < ledsOn ? COLOR_PURPLE : COLOR_OFF);
@@ -407,23 +395,14 @@ void streamOTAToVoltMon() {
 
   http.end();
 
-  if (!collectorConnected) {
-    Serial.println("OTA stream: VoltMon disconnected during transfer at " +
-                   String(totalSent) + "/" + String(contentLength));
-    flashActivity(COLOR_RED, 5, 100);
-    return;
-  }
-
   if (totalSent >= (size_t)contentLength) {
     Serial.println("OTA stream: Complete — " + String(totalSent) + " bytes sent");
-    // VoltMon finalizes and reboots on its own once all bytes received
     flashActivity(COLOR_GREEN, 5, 100);
     setUploadLED(COLOR_GREEN);
-
-    // Publish status to MQTT
+    // Clear OTA ctrl now that update is delivered
+    collectorOtaCtrlChar->setValue("");
     if (connectMQTT()) {
-      String msg = "OTA_PROXY_OK_" + cachedVoltMonVersion +
-                   "_to_" + bleOtaTargetDevice();
+      String msg = "OTA_PROXY_OK_" + cachedVoltMonVersion + "_to_" + bleOtaTargetDevice();
       feedDebug->publish(msg.c_str());
       mqtt.disconnect();
     }

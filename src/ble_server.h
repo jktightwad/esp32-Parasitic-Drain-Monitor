@@ -36,9 +36,9 @@ static String loadPendingRecords() {
   return content;
 }
 
-// ===== OTA CONNECTION — dedicated second connection for firmware transfer =====
-static bool doBLEOtaTransfer(size_t firmwareSize) {
-  Serial.println("BLE OTA: Scanning for collector...");
+// ===== OTA CHECK + TRANSFER — dedicated second connection =====
+static void doBLEOtaConnection() {
+  Serial.println("BLE OTA: Connecting for OTA check...");
 
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setActiveScan(true);
@@ -51,8 +51,7 @@ static bool doBLEOtaTransfer(size_t firmwareSize) {
   for (int i = 0; i < results.getCount(); i++) {
     NimBLEAdvertisedDevice device = results.getDevice(i);
     String name = String(device.getName().c_str());
-    // Accept either name — collector may still be in transition
-    if (name == "VoltMon-OTA" || name == "VoltMon-Collector") {
+    if (name == "VoltMon-Collector" || name == "VoltMon-OTA") {
       collector = new NimBLEAdvertisedDevice(device);
       Serial.println("BLE OTA: Collector found: " + name);
       break;
@@ -62,7 +61,7 @@ static bool doBLEOtaTransfer(size_t firmwareSize) {
 
   if (!collector) {
     Serial.println("BLE OTA: Collector not found");
-    return false;
+    return;
   }
 
   NimBLEClient* client = NimBLEDevice::createClient();
@@ -73,37 +72,54 @@ static bool doBLEOtaTransfer(size_t firmwareSize) {
   if (!connected) {
     Serial.println("BLE OTA: Connection failed");
     NimBLEDevice::deleteClient(client);
-    return false;
+    return;
   }
 
   Serial.println("BLE OTA: Connected");
 
   NimBLERemoteService* service = client->getService(BLE_SERVICE_UUID);
   if (!service) {
-    Serial.println("BLE OTA: Service not found");
     client->disconnect();
     NimBLEDevice::deleteClient(client);
-    return false;
+    return;
   }
 
   NimBLERemoteCharacteristic* deviceIdChar = service->getCharacteristic(BLE_DEVICE_ID_CHAR_UUID);
+  NimBLERemoteCharacteristic* otaCtrlChar  = service->getCharacteristic(BLE_OTA_CTRL_CHAR_UUID);
   NimBLERemoteCharacteristic* otaDataChar  = service->getCharacteristic(BLE_OTA_CHAR_UUID);
 
-  if (!deviceIdChar || !otaDataChar) {
+  if (!deviceIdChar || !otaCtrlChar || !otaDataChar) {
     Serial.println("BLE OTA: Characteristics not found");
     client->disconnect();
     NimBLEDevice::deleteClient(client);
-    return false;
+    return;
   }
 
-  // Extended supervision timeout for OTA
+  // Read pre-stored OTA status — collector sets this when firmware is cached
+  // No timing race: value is stored persistently, not set in a callback
+  std::string ctrlVal = otaCtrlChar->readValue();
+  String ctrl = String(ctrlVal.c_str());
+  ctrl.trim();
+  Serial.println("BLE OTA: ctrl char: [" + ctrl + "]");
+
+  if (!ctrl.startsWith("OTA_START:")) {
+    Serial.println("BLE OTA: No update available");
+    client->disconnect();
+    NimBLEDevice::deleteClient(client);
+    return;
+  }
+
+  size_t firmwareSize = ctrl.substring(10).toInt();
+  Serial.println("BLE OTA: Update available — " + String(firmwareSize) + " bytes");
+
+  // Extended supervision timeout
   client->setConnectionParams(12, 12, 0, 600);
 
   if (!Update.begin(firmwareSize)) {
     Serial.println("BLE OTA: Update.begin failed");
     client->disconnect();
     NimBLEDevice::deleteClient(client);
-    return false;
+    return;
   }
 
   bleOtaReceived = 0;
@@ -113,13 +129,13 @@ static bool doBLEOtaTransfer(size_t firmwareSize) {
     Update.abort();
     client->disconnect();
     NimBLEDevice::deleteClient(client);
-    return false;
+    return;
   }
 
   otaDataChar->subscribe(true, bleOtaDataCallback);
   Serial.println("BLE OTA: Subscribed to data");
 
-  // Signal collector we are ready — triggers stream on collector side
+  // Signal collector to start streaming
   deviceIdChar->writeValue("OTA_READY", true);
   Serial.println("BLE OTA: Sent OTA_READY — waiting for firmware...");
 
@@ -152,7 +168,7 @@ static bool doBLEOtaTransfer(size_t firmwareSize) {
       delay(500);
       ESP.restart();
     } else {
-      Serial.println("BLE OTA: Update.end failed");
+      Serial.println("BLE OTA: Update.end failed — " + String(Update.errorString()));
       Update.abort();
     }
   } else {
@@ -163,7 +179,6 @@ static bool doBLEOtaTransfer(size_t firmwareSize) {
 
   client->disconnect();
   NimBLEDevice::deleteClient(client);
-  return false;
 }
 
 // ===== SCAN FOR COLLECTOR AND TRANSFER =====
@@ -178,17 +193,12 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   NimBLEScanResults results = scan->start(5, false);
 
   NimBLEAdvertisedDevice* collector = nullptr;
-  bool otaAvailable = false;
-
   for (int i = 0; i < results.getCount(); i++) {
     NimBLEAdvertisedDevice device = results.getDevice(i);
     String name = String(device.getName().c_str());
-
     if (name == "VoltMon-Collector" || name == "VoltMon-OTA") {
-      collector    = new NimBLEAdvertisedDevice(device);
-      otaAvailable = (name == "VoltMon-OTA");
-      Serial.println("BLE: Collector found" +
-                     String(otaAvailable ? " (OTA available)" : ""));
+      collector = new NimBLEAdvertisedDevice(device);
+      Serial.println("BLE: Collector found");
       break;
     }
   }
@@ -221,7 +231,6 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   }
 
   NimBLERemoteCharacteristic* recordsChar  = service->getCharacteristic(BLE_RECORDS_CHAR_UUID);
-  NimBLERemoteCharacteristic* confirmChar  = service->getCharacteristic(BLE_CONFIRM_CHAR_UUID);
   NimBLERemoteCharacteristic* deviceIdChar = service->getCharacteristic(BLE_DEVICE_ID_CHAR_UUID);
 
   if (!recordsChar || !deviceIdChar) {
@@ -254,30 +263,15 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     transferOk = true;
   }
 
-  // Read confirm char to get OTA firmware size if OTA is available
-  size_t otaSize = 0;
-  if (otaAvailable && confirmChar) {
-    delay(500);
-    std::string val = confirmChar->readValue();
-    String cs = String(val.c_str());
-    cs.trim();
-    if (cs.startsWith("OTA_START:")) {
-      otaSize = cs.substring(10).toInt();
-      Serial.println("BLE: OTA size from confirm: " + String(otaSize));
-    }
-  }
-
   // Disconnect records connection cleanly
   client->disconnect();
   NimBLEDevice::deleteClient(client);
   Serial.println("BLE: Transfer done — success: " + String(transferOk));
 
-  // If OTA available — make dedicated second connection
-  if (otaAvailable && otaSize > 0) {
-    Serial.println("BLE OTA: Starting dedicated OTA connection...");
-    delay(500);
-    doBLEOtaTransfer(otaSize);
-  }
+  // Always do OTA check on second connection — fast disconnect if no update
+  Serial.println("BLE: OTA check connection...");
+  delay(500);
+  doBLEOtaConnection();
 
   return transferOk;
 }

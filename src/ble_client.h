@@ -54,7 +54,6 @@ class CollectorServerCallbacks : public NimBLEServerCallbacks {
     otaReadyReceived       = false;
     resetChunkState();
     // Clear OTA ctrl so VoltMon reads empty unless we set it
-    collectorOtaCtrlChar->setValue("");
     Serial.println("BLE: VoltMon connected");
   }
 
@@ -97,17 +96,11 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
       if (cachedVoltMonVersion.length() > 0 &&
           cachedFirmwareSize > 0 &&
           reportedVersion != cachedVoltMonVersion) {
-        String otaCmd = "OTA_START:" + String(cachedFirmwareSize);
-        collectorOtaCtrlChar->setValue(otaCmd.c_str());
-        collectorOtaCtrlChar->notify();
         otaStreamPending = true;
         otaTargetDevice  = receivedDeviceId;
         Serial.println("BLE: OTA queued for " + receivedDeviceId +
                        " v" + reportedVersion + " -> " + cachedVoltMonVersion +
                        " (" + String(cachedFirmwareSize) + " bytes)");
-      } else {
-        collectorOtaCtrlChar->setValue("");
-        collectorOtaCtrlChar->notify();
       }
     } else {
       // Old format without version — just device name
@@ -262,6 +255,18 @@ void collectorBleInit() {
   advertising->start();
 
   Serial.println("BLE: Collector advertising as VoltMon-Collector");
+}
+
+// ===== UPDATE OTA CTRL CHAR — call whenever firmware cache changes =====
+void bleSetOtaAvailable() {
+  if (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0) {
+    String otaCmd = "OTA_START:" + String(cachedFirmwareSize);
+    collectorOtaCtrlChar->setValue(otaCmd.c_str());
+    Serial.println("BLE: OTA ctrl set: " + otaCmd);
+  } else {
+    collectorOtaCtrlChar->setValue("");
+    Serial.println("BLE: OTA ctrl cleared");
+  }
 }
 
 // ===== UPDATE ADVERTISING WITH OTA INFO =====
