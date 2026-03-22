@@ -115,6 +115,7 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
       String payload = String(cfg.deviceName) + "|" + records;
       recordsChar->writeValue(payload.c_str(), true);
       Serial.println("BLE: Sent " + String(payload.length()) + " bytes");
+      delay(500);  // wait for collector onWrite callback to fire and set confirm
 
       unsigned long start = millis();
       while (millis() - start < 10000 && client->isConnected()) {
