@@ -120,6 +120,20 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+
+// Helper — set confirm char, piggybacking OTA signal if pending
+static void setConfirmValue(const String& base) {
+  if (base == "OK" && otaStreamPending && cachedFirmwareSize > 0) {
+    String otaConfirm = "OTA_START:" + String(cachedFirmwareSize);
+    collectorConfirmChar->setValue(otaConfirm.c_str());
+    collectorConfirmChar->notify();
+    Serial.println("BLE: Confirm piggybacked with OTA signal: " + otaConfirm);
+  } else {
+    collectorConfirmChar->setValue(base.c_str());
+    collectorConfirmChar->notify();
+  }
+}
+
 // ===== RECORDS CALLBACKS =====
 class RecordsCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* pChar) override {
@@ -131,7 +145,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
       Serial.println("BLE: VoltMon has no records");
       receivedEmpty         = true;
       collectorDataReceived = true;
-      collectorConfirmChar->setValue("OK");
+      setConfirmValue("OK");
       return;
     }
 
@@ -146,7 +160,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
           receivedRecords = chunkBuffer;
         }
         collectorDataReceived = true;
-        collectorConfirmChar->setValue("OK");
+        setConfirmValue("OK");
       } else {
         Serial.println("BLE: Transfer incomplete — expected " +
                        String(expectedChunks) + " got " + String(receivedChunks));
@@ -186,7 +200,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
       receivedRecords = val;
     }
     collectorDataReceived = true;
-    collectorConfirmChar->setValue("OK");
+    setConfirmValue("OK");
     Serial.println("BLE: Records received — " + String(receivedRecords.length()) + " bytes");
   }
 };

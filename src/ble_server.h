@@ -8,30 +8,16 @@
 #include "esp_task_wdt.h"
 
 // ===== OTA RECEIVE STATE =====
-static volatile size_t bleOtaReceived  = 0;
-static volatile bool   bleOtaDone      = false;
-static volatile bool   bleOtaSuccess   = false;
-static String bleOtaCtrlValue = "";
+static volatile size_t bleOtaReceived = 0;
+static volatile bool   bleOtaDone     = false;
+static volatile bool   bleOtaSuccess  = false;
 
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
   if (length == 0) return;
-  // Single 0x00 byte is a keep-alive — ignore
-  if (length == 1 && data[0] == 0x00) return;
+  if (length == 1 && data[0] == 0x00) return;  // keep-alive
   Update.write(data, length);
   bleOtaReceived += length;
-}
-
-static void bleOtaCtrlCallback(NimBLERemoteCharacteristic* pChar,
-                                uint8_t* data, size_t length, bool isNotify) {
-  if (length == 0) return;
-  String val = String((char*)data).substring(0, length);
-  val.trim();
-  // Only accept known prefixes — ignore initial subscription notification garbage
-  if (val.startsWith("OTA_START:") || val.startsWith("OTA_PREPARE:")) {
-    bleOtaCtrlValue = val;
-    Serial.println("BLE OTA ctrl notify: [" + bleOtaCtrlValue + "]");
-  }
 }
 
 // ===== LOAD PENDING RECORDS =====
@@ -113,20 +99,15 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     return false;
   }
 
-  // Subscribe to OTA ctrl notifications BEFORE writing device ID
-  // so we don't miss the notification from the collector
-  bleOtaCtrlValue = "";
-  if (otaCtrlChar && otaCtrlChar->canNotify()) {
-    otaCtrlChar->subscribe(true, bleOtaCtrlCallback);
-    bleOtaCtrlValue = "";  // clear any garbage from initial subscription notification
-    Serial.println("BLE: Subscribed to OTA ctrl notifications");
-  }
+  // Small delay to ensure collector onConnect has cleared the confirm char
+  delay(200);
 
   // Send device ID + current version so collector can check for OTA
   String deviceIdPayload = String(cfg.deviceName) + ":" + String(VOLTMON_VERSION);
   deviceIdChar->writeValue(deviceIdPayload.c_str(), true);
 
   bool transferOk = false;
+  String otaSignal = "";  // set if confirm char carries OTA_START signal
 
   if (hasRecords) {
     String records = loadPendingRecords();
@@ -136,13 +117,18 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
       Serial.println("BLE: Sent " + String(payload.length()) + " bytes");
 
       unsigned long start = millis();
-      while (millis() - start < 10000) {
-        std::string confirm = confirmChar->readValue();
-        String cs = String(confirm.c_str());
+      while (millis() - start < 10000 && client->isConnected()) {
+        // forceRead=true bypasses NimBLE client cache — reads from server each time
+        String cs = String(confirmChar->readValue().c_str());
         cs.trim();
         if (cs == "OK") {
           transferOk = true;
           Serial.println("BLE: Confirmed OK");
+          break;
+        } else if (cs.startsWith("OTA_START:")) {
+          transferOk = true;
+          otaSignal = cs;
+          Serial.println("BLE: Confirmed OK + OTA signal: " + otaSignal);
           break;
         } else if (cs == "FAIL") {
           Serial.println("BLE: Confirmed FAIL");
@@ -156,24 +142,27 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     }
   } else {
     recordsChar->writeValue("EMPTY", true);
-    transferOk = true;
+    // Still need to check confirm for OTA signal on EMPTY
+    unsigned long start = millis();
+    while (millis() - start < 3000 && client->isConnected()) {
+      String cs = String(confirmChar->readValue().c_str());
+      cs.trim();
+      if (cs == "OK") { transferOk = true; break; }
+      if (cs.startsWith("OTA_START:")) {
+        transferOk = true;
+        otaSignal = cs;
+        Serial.println("BLE: OTA signal on EMPTY: " + otaSignal);
+        break;
+      }
+      delay(200);
+    }
+    if (otaSignal.length() == 0) transferOk = true;
   }
 
   // ===== CHECK FOR OTA =====
-  // Wait up to 3 seconds for collector to notify OTA command
-  if (otaCtrlChar && otaDataChar) {
-    Serial.println("BLE: Waiting for OTA ctrl notification...");
-    unsigned long ctrlWait = millis();
-    while (bleOtaCtrlValue.length() == 0 &&
-           millis() - ctrlWait < 3000 &&
-           client->isConnected()) {
-      delay(50);
-    }
-
-    Serial.println("BLE OTA ctrl: [" + bleOtaCtrlValue + "]");
-
-    if (bleOtaCtrlValue.startsWith("OTA_START:")) {
-      size_t firmwareSize = bleOtaCtrlValue.substring(10).toInt();
+  if (otaCtrlChar && otaDataChar && otaSignal.length() > 0) {
+    if (otaSignal.startsWith("OTA_START:")) {
+      size_t firmwareSize = otaSignal.substring(10).toInt();
       Serial.println("BLE OTA: Starting — " + String(firmwareSize) + " bytes");
 
       if (firmwareSize == 0 || !Update.begin(firmwareSize)) {
