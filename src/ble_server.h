@@ -24,7 +24,7 @@ static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
   // Send ACK every window so collector knows it can send more
   if (bleOtaChunkCount % OTA_ACK_WINDOW == 0 && bleOtaDeviceIdChar != nullptr) {
     String ack = "ACK:" + String(bleOtaChunkCount);
-    bleOtaDeviceIdChar->writeValue(ack.c_str(), false);  // no response needed
+    bleOtaDeviceIdChar->writeValue(ack.c_str(), true);
   }
 }
 

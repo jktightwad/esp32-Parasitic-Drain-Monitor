@@ -363,7 +363,7 @@ void streamOTAToVoltMon() {
     if (chunkCount % ACK_WINDOW == 0) {
       bleOtaClearAck();
       unsigned long ackWait = millis();
-      while (!bleOtaAckReceived() && millis() - ackWait < 3000 && collectorConnected) {
+      while (!bleOtaAckReceived() && millis() - ackWait < 8000 && collectorConnected) {
         feedWatchdog();
         delay(10);
       }
