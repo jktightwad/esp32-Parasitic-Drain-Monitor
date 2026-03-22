@@ -193,17 +193,28 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     if (name == "VoltMon-Collector") {
       collector = new NimBLEAdvertisedDevice(device);
 
-      // Read OTA size from manufacturer data (company ID 0xFFFF + 4 byte size)
+      // Read OTA version+size from manufacturer data
+      // Format: 0xFFFF (2 bytes) + major,minor,patch (3 bytes) + size (4 bytes)
       std::string mfData = device.getManufacturerData();
-      if (mfData.length() >= 6) {
+      if (mfData.length() >= 9) {
         uint8_t id0 = (uint8_t)mfData[0];
         uint8_t id1 = (uint8_t)mfData[1];
         if (id0 == 0xFF && id1 == 0xFF) {
+          uint8_t maj = (uint8_t)mfData[2];
+          uint8_t min = (uint8_t)mfData[3];
+          uint8_t pat = (uint8_t)mfData[4];
           uint32_t sz = 0;
-          memcpy(&sz, &mfData[2], 4);
-          if (sz > 0) {
+          memcpy(&sz, &mfData[5], 4);
+          // Build version string and compare to our version
+          char advVer[16];
+          snprintf(advVer, sizeof(advVer), "%d.%d.%d", maj, min, pat);
+          Serial.println("BLE: Advert OTA version: " + String(advVer) +
+                         " ours: " + String(VOLTMON_VERSION));
+          if (String(advVer) != String(VOLTMON_VERSION) && sz > 0) {
             otaSize = (size_t)sz;
-            Serial.println("BLE: OTA size in advert: " + String(otaSize));
+            Serial.println("BLE: OTA needed — advert size: " + String(otaSize));
+          } else {
+            Serial.println("BLE: OTA not needed — already on " + String(VOLTMON_VERSION));
           }
         }
       }

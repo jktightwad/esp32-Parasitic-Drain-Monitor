@@ -273,14 +273,22 @@ void bleSetOtaAvailable() {
   advData.setName("VoltMon-Collector");
 
   if (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0) {
-    // Encode: company ID 0xFFFF (test) + 4-byte firmware size
-    uint8_t mfData[6];
-    mfData[0] = 0xFF;  // company ID low byte
-    mfData[1] = 0xFF;  // company ID high byte
+    // Encode: company ID 0xFFFF + 3 bytes version (major,minor,patch) + 4 bytes size
+    // Version format: "2.1.9" -> bytes 2,1,9
+    uint8_t mfData[9];
+    mfData[0] = 0xFF;
+    mfData[1] = 0xFF;
+    // Parse version
+    int maj = 0, min = 0, pat = 0;
+    sscanf(cachedVoltMonVersion.c_str(), "%d.%d.%d", &maj, &min, &pat);
+    mfData[2] = (uint8_t)maj;
+    mfData[3] = (uint8_t)min;
+    mfData[4] = (uint8_t)pat;
     uint32_t sz = (uint32_t)cachedFirmwareSize;
-    memcpy(&mfData[2], &sz, 4);
-    advData.setManufacturerData(std::string((char*)mfData, 6));
-    Serial.println("BLE: OTA size in advert: " + String(cachedFirmwareSize));
+    memcpy(&mfData[5], &sz, 4);
+    advData.setManufacturerData(std::string((char*)mfData, 9));
+    Serial.println("BLE: OTA in advert: v" + cachedVoltMonVersion +
+                   " size=" + String(cachedFirmwareSize));
   } else {
     Serial.println("BLE: OTA cleared from advert");
   }

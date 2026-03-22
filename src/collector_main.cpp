@@ -297,16 +297,6 @@ void checkVoltMonFirmwareVersion() {
 
 // ===== STREAM OTA FIRMWARE TO VOLTMON OVER BLE =====
 void streamOTAToVoltMon() {
-  // VoltMon will disconnect from records connection then reconnect for OTA
-  // Wait for disconnect if still connected
-  if (collectorConnected) {
-    unsigned long waitStart = millis();
-    while (collectorConnected && millis() - waitStart < 5000) {
-      feedWatchdog();
-      delay(50);
-    }
-  }
-
   Serial.println("OTA stream: Opening HTTP stream...");
   setActivityLED(COLOR_PURPLE);
 
@@ -332,23 +322,10 @@ void streamOTAToVoltMon() {
   int contentLength = http.getSize();
   Serial.println("OTA stream: content-length=" + String(contentLength));
 
-  // Wait for VoltMon to reconnect and send OTA_READY
-  Serial.println("OTA stream: waiting for VoltMon OTA reconnect...");
-  bleOtaClearReady();
-  unsigned long readyWait = millis();
-  while (!bleOtaReadyReceived() && millis() - readyWait < 30000) {
-    feedWatchdog();
-    delay(50);
-  }
-
-  if (!bleOtaReadyReceived()) {
-    Serial.println("OTA stream: VoltMon never reconnected — aborting");
-    http.end();
-    return;
-  }
-
+  // VoltMon is already connected and subscribed — OTA_READY already received
+  // Just verify it's still connected before streaming
   if (!collectorConnected) {
-    Serial.println("OTA stream: VoltMon disconnected after OTA_READY");
+    Serial.println("OTA stream: VoltMon not connected — aborting");
     http.end();
     return;
   }
@@ -419,6 +396,9 @@ void streamOTAToVoltMon() {
     setUploadLED(COLOR_GREEN);
     // Clear OTA ctrl now that update is delivered
     collectorOtaCtrlChar->setValue("");
+    cachedVoltMonVersion = "";
+    cachedFirmwareSize   = 0;
+    bleSetOtaAvailable();  // clears manufacturer data from advertising
     if (connectMQTT()) {
       String msg = "OTA_PROXY_OK_" + cachedVoltMonVersion + "_to_" + bleOtaTargetDevice();
       feedDebug->publish(msg.c_str());
@@ -808,19 +788,7 @@ void loop() {
 
     bleClearReceived();
 
-    // ===== OTA STREAM — triggered by VoltMon's dedicated second connection =====
-    // VoltMon reconnects and sends OTA_READY, DeviceIdCallbacks sets otaStreamPending
-    if (bleOtaStreamPending() && collectorConnected && wifiConnected) {
-      Serial.println("OTA stream: starting firmware stream to " + bleOtaTargetDevice());
-      streamOTAToVoltMon();
-      bleOtaClearPending();
-      setActivityLED(COLOR_DIM_BLUE);
-      return;
-    } else if (bleOtaStreamPending()) {
-      Serial.println("OTA stream: skipped — connected:" + String(collectorConnected) +
-                     " wifi:" + String(wifiConnected));
-      bleOtaClearPending();
-    }
+
 
     // ===== THEN HANDLE RECORDS =====
     if (isEmpty) {
@@ -847,6 +815,15 @@ void loop() {
       }
     }
 
+    setActivityLED(COLOR_DIM_BLUE);
+  }
+
+  // OTA stream — triggered by VoltMon's dedicated second connection sending OTA_READY
+  if (bleOtaReadyReceived() && collectorConnected && wifiConnected) {
+    bleOtaClearReady();
+    bleOtaClearPending();
+    Serial.println("OTA stream: starting firmware stream to " + bleOtaTargetDevice());
+    streamOTAToVoltMon();
     setActivityLED(COLOR_DIM_BLUE);
   }
 
