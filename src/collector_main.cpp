@@ -334,19 +334,15 @@ void streamOTAToVoltMon() {
 
   WiFiClient* stream = http.getStreamPtr();
 
-  const size_t CHUNK_SIZE  = 200;   // small chunks to avoid BLE queue overflow
-  const int    ACK_WINDOW  = 20;    // VoltMon ACKs every N chunks
+  const size_t CHUNK_SIZE = 480;  // max useful at 512 MTU
   uint8_t      buf[CHUNK_SIZE];
-  size_t       totalSent   = 0;
-  int          chunkCount  = 0;
-  unsigned long lastWdog   = millis();
+  size_t       totalSent     = 0;
+  unsigned long lastWdog     = millis();
   unsigned long lastProgress = millis();
-
-  bleOtaClearAck();
 
   while (http.connected() && totalSent < (size_t)contentLength && collectorConnected) {
     size_t available = stream->available();
-    if (available == 0) { delay(5); continue; }
+    if (available == 0) { delay(2); continue; }
 
     size_t toRead    = min(available, CHUNK_SIZE);
     size_t bytesRead = stream->readBytes(buf, toRead);
@@ -355,23 +351,8 @@ void streamOTAToVoltMon() {
     collectorOtaChar->setValue(buf, bytesRead);
     collectorOtaChar->notify();
     totalSent += bytesRead;
-    chunkCount++;
 
-    delay(30);
-
-    // Wait for ACK every window — flow control to prevent BLE queue overflow
-    if (chunkCount % ACK_WINDOW == 0) {
-      bleOtaClearAck();
-      unsigned long ackWait = millis();
-      while (!bleOtaAckReceived() && millis() - ackWait < 8000 && collectorConnected) {
-        feedWatchdog();
-        delay(10);
-      }
-      if (!bleOtaAckReceived()) {
-        Serial.println("OTA stream: ACK timeout at " + String(totalSent) + " bytes");
-        break;
-      }
-    }
+    delay(15);  // pacing — allow BLE stack time to queue and send
 
     if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
 
@@ -396,9 +377,6 @@ void streamOTAToVoltMon() {
     setUploadLED(COLOR_GREEN);
     // Clear OTA ctrl now that update is delivered
     collectorOtaCtrlChar->setValue("");
-    cachedVoltMonVersion = "";
-    cachedFirmwareSize   = 0;
-    bleSetOtaAvailable();  // clears manufacturer data from advertising
     if (connectMQTT()) {
       String msg = "OTA_PROXY_OK_" + cachedVoltMonVersion + "_to_" + bleOtaTargetDevice();
       feedDebug->publish(msg.c_str());

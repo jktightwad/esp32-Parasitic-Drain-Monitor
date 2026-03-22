@@ -8,9 +8,7 @@
 #include "esp_task_wdt.h"
 
 // ===== OTA RECEIVE STATE =====
-static volatile size_t bleOtaReceived   = 0;
-static volatile int    bleOtaChunkCount = 0;
-static const int       OTA_ACK_WINDOW   = 20;
+static volatile size_t bleOtaReceived = 0;
 
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
                                 uint8_t* data, size_t length, bool isNotify) {
@@ -18,8 +16,6 @@ static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
   if (length == 1 && data[0] == 0x00) return;  // keep-alive
   Update.write(data, length);
   bleOtaReceived += length;
-  bleOtaChunkCount++;
-  // ACK is sent from main task loop — never from inside a callback
 }
 
 // ===== LOAD PENDING RECORDS =====
@@ -106,8 +102,7 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
     return;
   }
 
-  bleOtaReceived   = 0;
-  bleOtaChunkCount = 0;
+  bleOtaReceived = 0;
 
   if (!otaDataChar->canNotify()) {
     Serial.println("BLE OTA: Cannot subscribe");
@@ -124,10 +119,9 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
   deviceIdChar->writeValue("OTA_READY", true);
   Serial.println("BLE OTA: Sent OTA_READY — waiting for firmware...");
 
-  unsigned long otaStart    = millis();
-  unsigned long lastLog     = millis();
-  unsigned long lastWdog    = millis();
-  int           lastAcked   = 0;
+  unsigned long otaStart = millis();
+  unsigned long lastLog  = millis();
+  unsigned long lastWdog = millis();
 
   while (bleOtaReceived < firmwareSize &&
          millis() - otaStart < 360000UL &&
@@ -138,17 +132,6 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
       lastWdog = millis();
     }
 
-    // Send ACK from main task every OTA_ACK_WINDOW chunks
-    int currentChunk = bleOtaChunkCount;
-    if (currentChunk > 0 &&
-        currentChunk % OTA_ACK_WINDOW == 0 &&
-        currentChunk != lastAcked) {
-      String ack = "ACK:" + String(currentChunk);
-      deviceIdChar->writeValue(ack.c_str(), true);
-      lastAcked = currentChunk;
-      Serial.println("BLE OTA: ACK " + String(currentChunk));
-    }
-
     if (millis() - lastLog > 10000) {
       Serial.println("BLE OTA: " +
                      String(bleOtaReceived * 100 / firmwareSize) + "% (" +
@@ -156,7 +139,7 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
       lastLog = millis();
     }
 
-    delay(10);
+    delay(5);
   }
 
   if (bleOtaReceived >= firmwareSize) {
