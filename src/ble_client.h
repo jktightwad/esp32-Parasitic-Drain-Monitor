@@ -257,31 +257,40 @@ void collectorBleInit() {
   Serial.println("BLE: Collector advertising as VoltMon-Collector");
 }
 
-// ===== UPDATE OTA CTRL CHAR — call whenever firmware cache changes =====
+// ===== UPDATE ADVERTISING WITH OTA INFO VIA MANUFACTURER DATA =====
+// Encodes firmware size as 4 bytes in manufacturer data — no characteristic read needed
 void bleSetOtaAvailable() {
-  if (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0) {
-    String otaCmd = "OTA_START:" + String(cachedFirmwareSize);
-    collectorOtaCtrlChar->setValue(otaCmd.c_str());
-    Serial.println("BLE: OTA ctrl set: " + otaCmd);
-  } else {
-    collectorOtaCtrlChar->setValue("");
-    Serial.println("BLE: OTA ctrl cleared");
-  }
-}
-
-// ===== UPDATE ADVERTISING WITH OTA INFO =====
-void bleUpdateAdvertising() {
-  // Use short flag name to stay within BLE 31-byte advertising packet limit
-  String advName = (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0)
-                   ? "VoltMon-OTA"
-                   : "VoltMon-Collector";
-
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
   advertising->stop();
-  NimBLEDevice::setDeviceName(advName.c_str());
-  advertising->start();
 
-  Serial.println("BLE: Advertising as: " + advName);
+  NimBLEAdvertisementData advData;
+  advData.setName("VoltMon-Collector");
+
+  if (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0) {
+    // Encode: company ID 0xFFFF (test) + 4-byte firmware size
+    uint8_t mfData[6];
+    mfData[0] = 0xFF;  // company ID low byte
+    mfData[1] = 0xFF;  // company ID high byte
+    uint32_t sz = (uint32_t)cachedFirmwareSize;
+    memcpy(&mfData[2], &sz, 4);
+    advData.setManufacturerData(std::string((char*)mfData, 6));
+    Serial.println("BLE: OTA size in advert: " + String(cachedFirmwareSize));
+  } else {
+    Serial.println("BLE: OTA cleared from advert");
+  }
+
+  advertising->setAdvertisementData(advData);
+
+  // Scan response carries service UUID so VoltMon can find service
+  NimBLEAdvertisementData scanData;
+  scanData.addServiceUUID(BLE_SERVICE_UUID);
+  advertising->setScanResponseData(scanData);
+
+  advertising->start();
+}
+
+void bleUpdateAdvertising() {
+  bleSetOtaAvailable();
 }
 
 // ===== COMMAND / DATA ACCESSORS =====

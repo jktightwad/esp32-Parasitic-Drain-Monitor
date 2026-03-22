@@ -212,9 +212,8 @@ void maintainWiFi() {
     delay(1000);
     if (connectWiFi() && cachedVoltMonVersion.length() == 0) {
       checkVoltMonFirmwareVersion();
-      if (cachedVoltMonVersion.length() > 0) {
-        bleUpdateAdvertising();
-      }
+      bleSetOtaAvailable();
+      bleUpdateAdvertising();
     }
   }
 }
@@ -760,10 +759,9 @@ void setup() {
   }
 
   collectorBleInit();
-  // Update advertising name with OTA info if available
-  if (cachedVoltMonVersion.length() > 0) {
-    bleUpdateAdvertising();
-  }
+  // Set OTA ctrl char and advertising name based on cached firmware
+  bleSetOtaAvailable();
+  bleUpdateAdvertising();
 
   Serial.println("Collector ready — waiting for VoltMon");
   if (cachedVoltMonVersion.length() > 0) {

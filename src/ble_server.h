@@ -36,9 +36,9 @@ static String loadPendingRecords() {
   return content;
 }
 
-// ===== OTA CHECK + TRANSFER — dedicated second connection =====
-static void doBLEOtaConnection() {
-  Serial.println("BLE OTA: Connecting for OTA check...");
+// ===== DEDICATED OTA CONNECTION =====
+static void doBLEOtaTransfer(size_t firmwareSize) {
+  Serial.println("BLE OTA: Connecting...");
 
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setActiveScan(true);
@@ -51,9 +51,8 @@ static void doBLEOtaConnection() {
   for (int i = 0; i < results.getCount(); i++) {
     NimBLEAdvertisedDevice device = results.getDevice(i);
     String name = String(device.getName().c_str());
-    if (name == "VoltMon-Collector" || name == "VoltMon-OTA") {
+    if (name == "VoltMon-Collector") {
       collector = new NimBLEAdvertisedDevice(device);
-      Serial.println("BLE OTA: Collector found: " + name);
       break;
     }
   }
@@ -85,34 +84,15 @@ static void doBLEOtaConnection() {
   }
 
   NimBLERemoteCharacteristic* deviceIdChar = service->getCharacteristic(BLE_DEVICE_ID_CHAR_UUID);
-  NimBLERemoteCharacteristic* otaCtrlChar  = service->getCharacteristic(BLE_OTA_CTRL_CHAR_UUID);
   NimBLERemoteCharacteristic* otaDataChar  = service->getCharacteristic(BLE_OTA_CHAR_UUID);
 
-  if (!deviceIdChar || !otaCtrlChar || !otaDataChar) {
+  if (!deviceIdChar || !otaDataChar) {
     Serial.println("BLE OTA: Characteristics not found");
     client->disconnect();
     NimBLEDevice::deleteClient(client);
     return;
   }
 
-  // Read pre-stored OTA status — collector sets this when firmware is cached
-  // No timing race: value is stored persistently, not set in a callback
-  std::string ctrlVal = otaCtrlChar->readValue();
-  String ctrl = String(ctrlVal.c_str());
-  ctrl.trim();
-  Serial.println("BLE OTA: ctrl char: [" + ctrl + "]");
-
-  if (!ctrl.startsWith("OTA_START:")) {
-    Serial.println("BLE OTA: No update available");
-    client->disconnect();
-    NimBLEDevice::deleteClient(client);
-    return;
-  }
-
-  size_t firmwareSize = ctrl.substring(10).toInt();
-  Serial.println("BLE OTA: Update available — " + String(firmwareSize) + " bytes");
-
-  // Extended supervision timeout
   client->setConnectionParams(12, 12, 0, 600);
 
   if (!Update.begin(firmwareSize)) {
@@ -125,7 +105,7 @@ static void doBLEOtaConnection() {
   bleOtaReceived = 0;
 
   if (!otaDataChar->canNotify()) {
-    Serial.println("BLE OTA: Cannot subscribe to data");
+    Serial.println("BLE OTA: Cannot subscribe");
     Update.abort();
     client->disconnect();
     NimBLEDevice::deleteClient(client);
@@ -133,9 +113,8 @@ static void doBLEOtaConnection() {
   }
 
   otaDataChar->subscribe(true, bleOtaDataCallback);
-  Serial.println("BLE OTA: Subscribed to data");
+  Serial.println("BLE OTA: Subscribed");
 
-  // Signal collector to start streaming
   deviceIdChar->writeValue("OTA_READY", true);
   Serial.println("BLE OTA: Sent OTA_READY — waiting for firmware...");
 
@@ -172,7 +151,7 @@ static void doBLEOtaConnection() {
       Update.abort();
     }
   } else {
-    Serial.println("BLE OTA: Timeout/disconnect — received " +
+    Serial.println("BLE OTA: Failed — received " +
                    String(bleOtaReceived) + "/" + String(firmwareSize));
     Update.abort();
   }
@@ -193,12 +172,31 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   NimBLEScanResults results = scan->start(5, false);
 
   NimBLEAdvertisedDevice* collector = nullptr;
+  size_t otaSize = 0;
+
   for (int i = 0; i < results.getCount(); i++) {
     NimBLEAdvertisedDevice device = results.getDevice(i);
     String name = String(device.getName().c_str());
-    if (name == "VoltMon-Collector" || name == "VoltMon-OTA") {
+
+    if (name == "VoltMon-Collector") {
       collector = new NimBLEAdvertisedDevice(device);
-      Serial.println("BLE: Collector found");
+
+      // Read OTA size from manufacturer data (company ID 0xFFFF + 4 byte size)
+      std::string mfData = device.getManufacturerData();
+      if (mfData.length() >= 6) {
+        uint8_t id0 = (uint8_t)mfData[0];
+        uint8_t id1 = (uint8_t)mfData[1];
+        if (id0 == 0xFF && id1 == 0xFF) {
+          uint32_t sz = 0;
+          memcpy(&sz, &mfData[2], 4);
+          if (sz > 0) {
+            otaSize = (size_t)sz;
+            Serial.println("BLE: OTA size in advert: " + String(otaSize));
+          }
+        }
+      }
+      Serial.println("BLE: Collector found" +
+                     String(otaSize > 0 ? " (OTA available)" : ""));
       break;
     }
   }
@@ -263,15 +261,16 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     transferOk = true;
   }
 
-  // Disconnect records connection cleanly
   client->disconnect();
   NimBLEDevice::deleteClient(client);
   Serial.println("BLE: Transfer done — success: " + String(transferOk));
 
-  // Always do OTA check on second connection — fast disconnect if no update
-  Serial.println("BLE: OTA check connection...");
-  delay(500);
-  doBLEOtaConnection();
+  // OTA size came from advertising packet — no characteristic read needed
+  if (otaSize > 0) {
+    Serial.println("BLE OTA: Starting dedicated OTA connection...");
+    delay(500);
+    doBLEOtaTransfer(otaSize);
+  }
 
   return transferOk;
 }
