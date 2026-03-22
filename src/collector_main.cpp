@@ -1,5 +1,7 @@
 #include "Arduino.h"
 #include <WiFi.h>
+#include "esp_partition.h"
+#include "esp_ota_ops.h"
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Update.h>
@@ -82,6 +84,7 @@ bool hasPendingBuffer = false;
 // ===== VOLTMON OTA CACHE — declared extern in ble_client.h =====
 String cachedVoltMonVersion = "";
 size_t cachedFirmwareSize   = 0;
+bool   voltmonFirmwareCached = false;  // true when firmware written to inactive partition
 
 #define COLLECTOR_PENDING_FILE  "/col_pending.csv"
 
@@ -202,6 +205,7 @@ bool connectWiFi() {
 }
 
 void checkVoltMonFirmwareVersion();  // forward declaration
+bool downloadVoltMonFirmware();       // forward declaration
 
 void maintainWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
@@ -280,10 +284,16 @@ void checkVoltMonFirmwareVersion() {
     http.end();
 
     if (size > 0) {
+      bool versionChanged = (cachedVoltMonVersion != remoteVersion);
       cachedVoltMonVersion = remoteVersion;
       cachedFirmwareSize   = (size_t)size;
+      voltmonFirmwareCached = false;  // need fresh download
       Serial.println("VoltMon firmware cached: v" + cachedVoltMonVersion +
                      " size=" + String(cachedFirmwareSize) + " bytes");
+      if (versionChanged || !voltmonFirmwareCached) {
+        Serial.println("VoltMon firmware changed — downloading to partition...");
+        downloadVoltMonFirmware();
+      }
       bleSetOtaAvailable();
     } else {
       Serial.println("VoltMon firmware size unknown");
@@ -296,22 +306,44 @@ void checkVoltMonFirmwareVersion() {
 }
 
 // ===== STREAM OTA FIRMWARE TO VOLTMON OVER BLE =====
-void streamOTAToVoltMon() {
-  Serial.println("OTA stream: Opening HTTP stream...");
-  setActivityLED(COLOR_PURPLE);
+// ===== DOWNLOAD VOLTMON FIRMWARE TO INACTIVE OTA PARTITION =====
+bool downloadVoltMonFirmware() {
+  if (cachedFirmwareSize == 0 || cachedVoltMonVersion.length() == 0) {
+    Serial.println("OTA download: no firmware version cached");
+    return false;
+  }
 
-  // Ensure WiFi is solid before long HTTP stream
+  // Get the inactive OTA partition — safe to write to
+  const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
+  if (!partition) {
+    Serial.println("OTA download: no inactive partition found");
+    return false;
+  }
+
+  Serial.println("OTA download: target partition: " + String(partition->label) +
+                 " size=" + String(partition->size));
+
+  if (cachedFirmwareSize > partition->size) {
+    Serial.println("OTA download: firmware too large for partition");
+    return false;
+  }
+
+  // Ensure WiFi before long download
   maintainWiFi();
   if (!wifiConnected) {
-    Serial.println("OTA stream: WiFi not available — aborting");
-    return;
+    Serial.println("OTA download: WiFi not available");
+    return false;
   }
+
+  Serial.println("OTA download: fetching v" + cachedVoltMonVersion + "...");
+  setActivityLED(COLOR_PURPLE);
 
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
 
   HTTPClient http;
-  http.begin(secureClient, VOLTMON_OTA_FIRMWARE_URL);
+  String versionedUrl = String(VOLTMON_OTA_FIRMWARE_URL) + "?t=" + String(millis());
+  http.begin(secureClient, versionedUrl);
   http.setTimeout(60000);
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
@@ -320,65 +352,65 @@ void streamOTAToVoltMon() {
   feedWatchdog();
 
   if (httpCode != 200) {
-    Serial.println("OTA stream: firmware fetch failed — HTTP " + String(httpCode));
+    Serial.println("OTA download: HTTP failed — " + String(httpCode));
     http.end();
-    flashActivity(COLOR_RED, 5, 100);
-    return;
+    flashActivity(COLOR_RED);
+    return false;
   }
 
   int contentLength = http.getSize();
-  Serial.println("OTA stream: content-length=" + String(contentLength));
+  Serial.println("OTA download: content-length=" + String(contentLength));
 
-  // VoltMon is already connected and subscribed — OTA_READY already received
-  // Just verify it's still connected before streaming
-  if (!collectorConnected) {
-    Serial.println("OTA stream: VoltMon not connected — aborting");
+  if (contentLength <= 0 || (size_t)contentLength != cachedFirmwareSize) {
+    Serial.println("OTA download: size mismatch — expected " +
+                   String(cachedFirmwareSize) + " got " + String(contentLength));
     http.end();
-    return;
+    return false;
   }
 
-  Serial.println("OTA stream: VoltMon ready — starting indicate stream");
+  // Erase partition
+  Serial.println("OTA download: erasing partition...");
+  esp_err_t err = esp_partition_erase_range(partition, 0, partition->size);
+  if (err != ESP_OK) {
+    Serial.println("OTA download: erase failed — " + String(esp_err_to_name(err)));
+    http.end();
+    return false;
+  }
 
   WiFiClient* stream = http.getStreamPtr();
 
-  // indicate() blocks until VoltMon acknowledges each chunk — guaranteed delivery
-  const size_t CHUNK_SIZE = 480;
-  uint8_t      buf[CHUNK_SIZE];
-  size_t       totalSent     = 0;
+  const size_t BUF_SIZE = 4096;
+  uint8_t      buf[BUF_SIZE];
+  size_t       written       = 0;
+  uint32_t     offset        = 0;
   unsigned long lastWdog     = millis();
   unsigned long lastProgress = millis();
 
-  while (http.connected() && totalSent < (size_t)contentLength && collectorConnected) {
-    size_t remaining = (size_t)contentLength - totalSent;
-    size_t toRead    = min(remaining, CHUNK_SIZE);
-    size_t bytesRead = 0;
-    unsigned long readStart = millis();
+  while (http.connected() && written < (size_t)contentLength) {
+    size_t available = stream->available();
+    if (available == 0) { delay(5); continue; }
 
-    while (bytesRead < toRead && millis() - readStart < 5000) {
-      if (stream->available()) {
-        bytesRead += stream->readBytes(buf + bytesRead, toRead - bytesRead);
-      } else {
-        delay(1);
-      }
+    size_t toRead    = min(available, BUF_SIZE);
+    size_t bytesRead = stream->readBytes(buf, toRead);
+    if (bytesRead == 0) continue;
+
+    err = esp_partition_write(partition, offset, buf, bytesRead);
+    if (err != ESP_OK) {
+      Serial.println("OTA download: write failed at " + String(offset));
+      http.end();
+      voltmonFirmwareCached = false;
+      return false;
     }
 
-    if (bytesRead == 0) {
-      Serial.println("OTA stream: HTTP read failed at " + String(totalSent));
-      break;
-    }
+    offset  += bytesRead;
+    written += bytesRead;
 
-    // indicate() waits for BLE acknowledgment before returning — no drops possible
-    collectorOtaChar->setValue(buf, bytesRead);
-    collectorOtaChar->indicate();
-    totalSent += bytesRead;
-
-    if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
-
-    if (millis() - lastProgress > 10000) {
-      int pct = (contentLength > 0) ? (totalSent * 100 / contentLength) : 0;
-      Serial.println("OTA stream: " + String(pct) + "% (" +
-                     String(totalSent) + "/" + String(contentLength) + ")");
-      int ledsOn = (totalSent * LED_ACTIVITY_COUNT) / contentLength;
+    if (millis() - lastWdog > 5000)    { feedWatchdog(); lastWdog = millis(); }
+    if (millis() - lastProgress > 5000) {
+      int pct = (contentLength > 0) ? (written * 100 / contentLength) : 0;
+      Serial.println("OTA download: " + String(pct) + "% (" +
+                     String(written) + "/" + String(contentLength) + ")");
+      int ledsOn = (written * LED_ACTIVITY_COUNT) / contentLength;
       for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
         strip.setPixelColor(i, (i - LED_ACTIVITY_START) < ledsOn ? COLOR_PURPLE : COLOR_OFF);
       }
@@ -389,20 +421,112 @@ void streamOTAToVoltMon() {
 
   http.end();
 
-  if (totalSent >= (size_t)contentLength) {
+  if (written != (size_t)contentLength) {
+    Serial.println("OTA download: incomplete — " + String(written) +
+                   "/" + String(contentLength));
+    voltmonFirmwareCached = false;
+    return false;
+  }
+
+  voltmonFirmwareCached = true;
+  Serial.println("OTA download: complete — " + String(written) + " bytes written to " +
+                 String(partition->label));
+  flashActivity(COLOR_GREEN, 3, 100);
+  setActivityLED(COLOR_DIM_BLUE);
+  return true;
+}
+
+void streamOTAToVoltMon() {
+  if (!voltmonFirmwareCached || cachedFirmwareSize == 0) {
+    Serial.println("OTA stream: no firmware cached — aborting");
+    return;
+  }
+
+  const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
+  if (!partition) {
+    Serial.println("OTA stream: partition not found");
+    return;
+  }
+
+  if (!collectorConnected) {
+    Serial.println("OTA stream: VoltMon not connected");
+    return;
+  }
+
+  Serial.println("OTA stream: pull mode — " + String(cachedFirmwareSize) +
+                 " bytes from " + String(partition->label));
+  setActivityLED(COLOR_PURPLE);
+
+  const size_t CHUNK_SIZE = 480;
+  uint8_t      buf[CHUNK_SIZE];
+  size_t       totalSent   = 0;
+  uint32_t     offset      = 0;
+  unsigned long lastWdog   = millis();
+  unsigned long lastProgress = millis();
+
+  bleOtaClearNext();
+
+  while (totalSent < cachedFirmwareSize && collectorConnected) {
+
+    // Wait for VoltMon to request next chunk — it just wrote the previous one to flash
+    unsigned long nextWait = millis();
+    while (!bleOtaNextRequested() && collectorConnected && millis() - nextWait < 10000) {
+      feedWatchdog();
+      delay(1);
+    }
+
+    if (!bleOtaNextRequested()) {
+      Serial.println("OTA stream: NEXT timeout at " + String(totalSent));
+      break;
+    }
+    bleOtaClearNext();
+
+    // Read chunk from local partition — instant, no network
+    size_t remaining = cachedFirmwareSize - totalSent;
+    size_t toRead    = min(remaining, CHUNK_SIZE);
+
+    esp_err_t err = esp_partition_read(partition, offset, buf, toRead);
+    if (err != ESP_OK) {
+      Serial.println("OTA stream: partition read failed at " + String(offset));
+      break;
+    }
+
+    // Send chunk via indication
+    collectorOtaChar->setValue(buf, toRead);
+    collectorOtaChar->indicate();
+    totalSent += toRead;
+    offset    += toRead;
+
+    if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
+
+    if (millis() - lastProgress > 10000) {
+      int pct = totalSent * 100 / cachedFirmwareSize;
+      Serial.println("OTA stream: " + String(pct) + "% (" +
+                     String(totalSent) + "/" + String(cachedFirmwareSize) + ")");
+      int ledsOn = (totalSent * LED_ACTIVITY_COUNT) / cachedFirmwareSize;
+      for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
+        strip.setPixelColor(i, (i - LED_ACTIVITY_START) < ledsOn ? COLOR_PURPLE : COLOR_OFF);
+      }
+      strip.show();
+      lastProgress = millis();
+    }
+  }
+
+  if (totalSent >= cachedFirmwareSize) {
     Serial.println("OTA stream: Complete — " + String(totalSent) + " bytes sent");
     flashActivity(COLOR_GREEN, 5, 100);
     setUploadLED(COLOR_GREEN);
-    // Clear OTA ctrl now that update is delivered
-    collectorOtaCtrlChar->setValue("");
+    voltmonFirmwareCached = false;
+    cachedVoltMonVersion  = "";
+    cachedFirmwareSize    = 0;
+    bleSetOtaAvailable();
     if (connectMQTT()) {
-      String msg = "OTA_PROXY_OK_" + cachedVoltMonVersion + "_to_" + bleOtaTargetDevice();
-      feedDebug->publish(msg.c_str());
+      feedDebug->publish(("OTA_PROXY_OK_to_" + bleOtaTargetDevice()).c_str());
       mqtt.disconnect();
     }
   } else {
-    Serial.println("OTA stream: Incomplete — sent " + String(totalSent) +
-                   "/" + String(contentLength));
+    Serial.println("OTA stream: Incomplete — " + String(totalSent) +
+                   "/" + String(cachedFirmwareSize));
     flashActivity(COLOR_RED, 5, 100);
   }
 }
@@ -754,7 +878,10 @@ void setup() {
   }
 
   collectorBleInit();
-  // Set OTA ctrl char and advertising name based on cached firmware
+  // Download firmware to partition if available, then advertise
+  if (cachedVoltMonVersion.length() > 0 && !voltmonFirmwareCached) {
+    downloadVoltMonFirmware();
+  }
   bleSetOtaAvailable();
   bleUpdateAdvertising();
 
