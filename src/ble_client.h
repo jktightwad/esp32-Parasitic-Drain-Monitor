@@ -261,12 +261,13 @@ void collectorBleInit() {
 
   service->start();
 
+  // Set up advertising params but don't start yet
+  // bleSetOtaAvailable() will start advertising with manufacturer data intact
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(BLE_SERVICE_UUID);
   advertising->setScanResponse(true);
-  advertising->start();
 
-  Serial.println("BLE: Collector advertising as VoltMon-Collector");
+  Serial.println("BLE: Collector BLE server ready");
 }
 
 // ===== UPDATE ADVERTISING WITH OTA INFO VIA MANUFACTURER DATA =====

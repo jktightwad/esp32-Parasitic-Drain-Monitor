@@ -92,7 +92,7 @@ String lastKnownVoltMonVer   = "";  // last version VoltMon reported via BLE
 int parseVersionInt(const String& v) {
   int maj = 0, min = 0, pat = 0;
   sscanf(v.c_str(), "%d.%d.%d", &maj, &min, &pat);
-  return maj * 1000000 + min * 1000 + pat;
+  return maj * 10000 + min * 100 + pat;
 }
 
 // Returns true if vA is strictly newer than vB
@@ -372,6 +372,11 @@ bool downloadVoltMonFirmware() {
   Serial.println("OTA download: target partition: " + String(partition->label) +
                  " size=" + String(partition->size));
 
+  // Stop BLE advertising during download — WiFi and BLE share radio on ESP32-C3
+  // Heavy WiFi traffic kills BLE advertising reliability
+  NimBLEDevice::getAdvertising()->stop();
+  Serial.println("OTA download: BLE advertising paused");
+
   if (cachedFirmwareSize > partition->size) {
     Serial.println("OTA download: firmware too large for partition");
     return false;
@@ -474,6 +479,7 @@ bool downloadVoltMonFirmware() {
     Serial.println("OTA download: incomplete — " + String(written) +
                    "/" + String(contentLength));
     voltmonFirmwareCached = false;
+    NimBLEDevice::getAdvertising()->start();  // resume even on failure
     return false;
   }
 
@@ -481,6 +487,10 @@ bool downloadVoltMonFirmware() {
   saveVoltMonCache();
   Serial.println("OTA download: complete — " + String(written) + " bytes written to " +
                  String(partition->label));
+
+  // Resume BLE advertising with OTA info
+  bleSetOtaAvailable();
+  Serial.println("OTA download: BLE advertising resumed");
   flashActivity(COLOR_GREEN, 3, 100);
   setActivityLED(COLOR_DIM_BLUE);
   return true;
@@ -1093,7 +1103,7 @@ void setup() {
   if (cachedVoltMonVersion.length() > 0 && !voltmonFirmwareCached) {
     downloadVoltMonFirmware();
   }
-  // Set OTA manufacturer data once — bleSetOtaAvailable restarts advertising
+  // Single call to start advertising with manufacturer data
   bleSetOtaAvailable();
 
   Serial.println("Collector ready — waiting for VoltMon");
