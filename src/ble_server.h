@@ -9,9 +9,14 @@
 #include "esp_ota_ops.h"
 
 // ===== OTA CHUNK BUFFER =====
-// Callback stores chunk here; main loop writes to partition and requests next
+// Accumulate BLE chunks into a 4096-byte page buffer
+// Write to flash only when page is full — matches flash page size for efficiency
+static const size_t OTA_PAGE_SIZE  = 4096;
+static const size_t OTA_CHUNK_SIZE = 480;
+static uint8_t  bleOtaPageBuf[OTA_PAGE_SIZE];
+static size_t   bleOtaPageUsed  = 0;
 static uint8_t  bleOtaChunkBuf[512];
-static size_t   bleOtaChunkLen   = 0;
+static size_t   bleOtaChunkLen  = 0;
 static volatile bool bleOtaChunkReady = false;
 
 static void bleOtaDataCallback(NimBLERemoteCharacteristic* pChar,
@@ -112,6 +117,7 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
   // Subscribe — indication preferred, notification fallback
   bleOtaChunkReady = false;
   bleOtaChunkLen   = 0;
+  bleOtaPageUsed   = 0;
   bool subOk = false;
   if (otaDataChar->canIndicate()) {
     subOk = otaDataChar->subscribe(false, bleOtaDataCallback);
@@ -128,7 +134,7 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
   // Signal ready and request first chunk
   deviceIdChar->writeValue("OTA_READY", true);
   deviceIdChar->writeValue("NEXT", true);
-  Serial.println("BLE OTA: Pulling firmware...");
+  Serial.println("BLE OTA: Pulling firmware (page-buffered)...");
 
   size_t         received   = 0;
   uint32_t       offset     = 0;
@@ -144,28 +150,38 @@ static void doBLEOtaTransfer(size_t firmwareSize) {
     if (millis() - lastWdog > 5000) { esp_task_wdt_reset(); lastWdog = millis(); }
 
     if (bleOtaChunkReady) {
-      bleOtaChunkReady = false;
-      size_t len       = bleOtaChunkLen;
-      chunkStart       = millis();
+      bleOtaChunkReady  = false;
+      size_t len        = bleOtaChunkLen;
+      chunkStart        = millis();
 
-      // Write chunk to flash BEFORE requesting next — guarantees order
-      err = esp_partition_write(partition, offset, bleOtaChunkBuf, len);
-      if (err != ESP_OK) {
-        Serial.println("BLE OTA: Write failed at " + String(offset));
-        break;
-      }
-      offset   += len;
-      received += len;
+      // Accumulate into page buffer
+      memcpy(bleOtaPageBuf + bleOtaPageUsed, bleOtaChunkBuf, len);
+      bleOtaPageUsed += len;
+      received       += len;
 
-      // Now request next chunk
-      if (received < firmwareSize) {
+      bool isLast   = (received >= firmwareSize);
+      bool pageFull = (bleOtaPageUsed >= OTA_PAGE_SIZE);
+
+      // Pipeline: request next chunk BEFORE writing to flash
+      if (!isLast) {
         deviceIdChar->writeValue("NEXT", true);
+      }
+
+      // Write page to flash only when full or at end
+      if (pageFull || isLast) {
+        err = esp_partition_write(partition, offset, bleOtaPageBuf, bleOtaPageUsed);
+        if (err != ESP_OK) {
+          Serial.println("BLE OTA: Write failed at " + String(offset));
+          break;
+        }
+        offset        += bleOtaPageUsed;
+        bleOtaPageUsed = 0;
       }
     }
 
     // Retry if chunk not arriving
     if (!bleOtaChunkReady && millis() - chunkStart > 5000 && received < firmwareSize) {
-      Serial.println("BLE OTA: Chunk timeout — retrying NEXT at " + String(received));
+      Serial.println("BLE OTA: Chunk timeout — retrying at " + String(received));
       deviceIdChar->writeValue("NEXT", true);
       chunkStart = millis();
     }

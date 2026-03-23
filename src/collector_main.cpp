@@ -85,6 +85,30 @@ bool hasPendingBuffer = false;
 String cachedVoltMonVersion = "";
 size_t cachedFirmwareSize   = 0;
 bool   voltmonFirmwareCached = false;  // true when firmware written to inactive partition
+#define VOLTMON_CACHE_FILE "/voltmon_cached.txt"
+
+void saveVoltMonCache() {
+  File f = LittleFS.open(VOLTMON_CACHE_FILE, "w");
+  if (!f) return;
+  f.println(cachedVoltMonVersion);
+  f.println(cachedFirmwareSize);
+  f.println(voltmonFirmwareCached ? "1" : "0");
+  f.close();
+}
+
+void loadVoltMonCache() {
+  if (!LittleFS.exists(VOLTMON_CACHE_FILE)) return;
+  File f = LittleFS.open(VOLTMON_CACHE_FILE, "r");
+  if (!f) return;
+  cachedVoltMonVersion = f.readStringUntil('\n'); cachedVoltMonVersion.trim();
+  cachedFirmwareSize   = f.readStringUntil('\n').toInt();
+  String cached        = f.readStringUntil('\n'); cached.trim();
+  voltmonFirmwareCached = (cached == "1");
+  f.close();
+  if (voltmonFirmwareCached)
+    Serial.println("VoltMon cache restored: v" + cachedVoltMonVersion +
+                   " size=" + String(cachedFirmwareSize));
+}
 
 #define COLLECTOR_PENDING_FILE  "/col_pending.csv"
 
@@ -287,7 +311,7 @@ void checkVoltMonFirmwareVersion() {
       bool versionChanged = (cachedVoltMonVersion != remoteVersion);
       cachedVoltMonVersion = remoteVersion;
       cachedFirmwareSize   = (size_t)size;
-      voltmonFirmwareCached = false;  // need fresh download
+      if (versionChanged) voltmonFirmwareCached = false;
       Serial.println("VoltMon firmware cached: v" + cachedVoltMonVersion +
                      " size=" + String(cachedFirmwareSize) + " bytes");
       if (versionChanged || !voltmonFirmwareCached) {
@@ -380,7 +404,7 @@ bool downloadVoltMonFirmware() {
   WiFiClient* stream = http.getStreamPtr();
 
   const size_t BUF_SIZE = 4096;
-  uint8_t      buf[BUF_SIZE];
+  static uint8_t buf[BUF_SIZE];
   size_t       written       = 0;
   uint32_t     offset        = 0;
   unsigned long lastWdog     = millis();
@@ -429,6 +453,7 @@ bool downloadVoltMonFirmware() {
   }
 
   voltmonFirmwareCached = true;
+  saveVoltMonCache();
   Serial.println("OTA download: complete — " + String(written) + " bytes written to " +
                  String(partition->label));
   flashActivity(COLOR_GREEN, 3, 100);
@@ -519,6 +544,7 @@ void streamOTAToVoltMon() {
     voltmonFirmwareCached = false;
     cachedVoltMonVersion  = "";
     cachedFirmwareSize    = 0;
+    saveVoltMonCache();
     bleSetOtaAvailable();
     if (connectMQTT()) {
       feedDebug->publish(("OTA_PROXY_OK_to_" + bleOtaTargetDevice()).c_str());
@@ -865,6 +891,7 @@ void setup() {
     while (1) delay(1000);
   }
   Serial.println("LittleFS OK");
+  loadVoltMonCache();
 
   if (!connectWiFi()) {
     Serial.println("WARNING: WiFi failed on startup — will retry in loop");
