@@ -6,7 +6,7 @@
 #define VOLTMON_VERSION     "2.2.7"
 
 // ===== COLLECTOR VERSION =====
-#define COLLECTOR_VERSION   "1.2.1"
+#define COLLECTOR_VERSION   "1.2.2"
 
 // ===== VOLTMON OTA =====
 #define VOLTMON_OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/voltmon/version.txt"

@@ -82,17 +82,31 @@ bool wifiConnected    = false;
 bool hasPendingBuffer = false;
 
 // ===== VOLTMON OTA CACHE — declared extern in ble_client.h =====
-String cachedVoltMonVersion = "";
-size_t cachedFirmwareSize   = 0;
-bool   voltmonFirmwareCached = false;  // true when firmware written to inactive partition
+String cachedVoltMonVersion  = "";
+size_t cachedFirmwareSize    = 0;
+bool   voltmonFirmwareCached = false;
+String lastKnownVoltMonVer   = "";  // last version VoltMon reported via BLE
 #define VOLTMON_CACHE_FILE "/voltmon_cached.txt"
 
+// Parse version string into integer for comparison: "2.1.9" -> 20109
+int parseVersionInt(const String& v) {
+  int maj = 0, min = 0, pat = 0;
+  sscanf(v.c_str(), "%d.%d.%d", &maj, &min, &pat);
+  return maj * 10000 + min * 100 + pat;
+}
+
+// Returns true if vA is strictly newer than vB
+bool versionNewer(const String& vA, const String& vB) {
+  return parseVersionInt(vA) > parseVersionInt(vB);
+}
+
 void saveVoltMonCache() {
-  File f = LittleFS.open(VOLTMON_CACHE_FILE, "w");
+  File f = LittleFS.open(VOLTMON_CACHE_FILE, "w", true);
   if (!f) return;
   f.println(cachedVoltMonVersion);
   f.println(cachedFirmwareSize);
   f.println(voltmonFirmwareCached ? "1" : "0");
+  f.println(lastKnownVoltMonVer);
   f.close();
 }
 
@@ -104,10 +118,11 @@ void loadVoltMonCache() {
   cachedFirmwareSize   = f.readStringUntil('\n').toInt();
   String cached        = f.readStringUntil('\n'); cached.trim();
   voltmonFirmwareCached = (cached == "1");
+  lastKnownVoltMonVer  = f.readStringUntil('\n'); lastKnownVoltMonVer.trim();
   f.close();
-  if (voltmonFirmwareCached)
-    Serial.println("VoltMon cache restored: v" + cachedVoltMonVersion +
-                   " size=" + String(cachedFirmwareSize));
+  Serial.println("VoltMon cache: firmware=v" + cachedVoltMonVersion +
+                 " lastSeen=v" + lastKnownVoltMonVer +
+                 " cached=" + String(voltmonFirmwareCached ? "yes" : "no"));
 }
 
 #define COLLECTOR_PENDING_FILE  "/col_pending.csv"
@@ -289,8 +304,18 @@ void checkVoltMonFirmwareVersion() {
   http.end();
   remoteVersion.trim();
 
-  if (remoteVersion == cachedVoltMonVersion && cachedFirmwareSize > 0) {
-    Serial.println("VoltMon firmware unchanged: " + remoteVersion);
+  // Only download if GitHub version is newer than what VoltMon last reported
+  if (lastKnownVoltMonVer.length() > 0 &&
+      !versionNewer(remoteVersion, lastKnownVoltMonVer)) {
+    Serial.println("VoltMon on v" + lastKnownVoltMonVer +
+                   " — GitHub v" + remoteVersion + " not newer, skipping");
+    return;
+  }
+
+  // Already have this version downloaded
+  if (remoteVersion == cachedVoltMonVersion && cachedFirmwareSize > 0 && voltmonFirmwareCached) {
+    Serial.println("VoltMon firmware already downloaded: v" + remoteVersion);
+    bleSetOtaAvailable();
     return;
   }
 
@@ -592,6 +617,7 @@ bool pushOTAToVoltMon() {
     Serial.println("OTA push: Complete — " + String(totalSent) + " bytes sent");
     flashActivity(COLOR_GREEN, 5, 100);
     // Clear cache
+    lastKnownVoltMonVer   = cachedVoltMonVersion;  // VoltMon now has this version
     voltmonFirmwareCached = false;
     cachedVoltMonVersion  = "";
     cachedFirmwareSize    = 0;
@@ -698,6 +724,7 @@ void streamOTAToVoltMon() {
     Serial.println("OTA stream: Complete — " + String(totalSent) + " bytes sent");
     flashActivity(COLOR_GREEN, 5, 100);
     setUploadLED(COLOR_GREEN);
+    lastKnownVoltMonVer   = cachedVoltMonVersion;  // VoltMon now has this version
     voltmonFirmwareCached = false;
     cachedVoltMonVersion  = "";
     cachedFirmwareSize    = 0;
@@ -946,7 +973,7 @@ void checkAndApplyOTA() {
   Serial.println("Collector local: " + String(COLLECTOR_VERSION) +
                  " remote: " + remoteVersion);
 
-  if (remoteVer <= localVer) { Serial.println("Collector up to date"); return; }
+  if (remoteVer <= localVer) { Serial.println("Collector v" + String(COLLECTOR_VERSION) + " up to date"); return; }
 
   Serial.println("Updating collector to " + remoteVersion + "...");
   setActivityLED(COLOR_PURPLE);
@@ -1171,7 +1198,7 @@ void loop() {
     setActivityLED(COLOR_PURPLE);
     checkAndApplyOTA();
     setActivityLED(COLOR_DIM_BLUE);
-    lastOTACheck = millis() + 300000UL; // offset from VoltMon version check for OTA
+    lastOTACheck = millis() + 300000UL; // offset from VoltMon version check
   }
 
   // Idle pulse animation

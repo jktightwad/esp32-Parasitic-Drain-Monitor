@@ -99,10 +99,15 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
       Serial.println("BLE: Device ID: " + receivedDeviceId +
                      " v" + reportedVersion);
 
-      // Check if OTA update is available
+      // Save VoltMon's reported version so collector knows what it currently has
+      extern String lastKnownVoltMonVer;
+      lastKnownVoltMonVer = reportedVersion;
+
+      // Check if OTA update is available — only if cached version is newer
+      extern bool versionNewer(const String&, const String&);
       if (cachedVoltMonVersion.length() > 0 &&
           cachedFirmwareSize > 0 &&
-          reportedVersion != cachedVoltMonVersion) {
+          versionNewer(cachedVoltMonVersion, reportedVersion)) {
         otaStreamPending = true;
         otaTargetDevice  = receivedDeviceId;
         Serial.println("BLE: OTA queued for " + receivedDeviceId +
