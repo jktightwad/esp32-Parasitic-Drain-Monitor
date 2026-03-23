@@ -587,7 +587,7 @@ bool pushOTAToVoltMon() {
 
   if (success) {
     // Send END marker
-    otaChar->writeValue("END", 3, false);
+    otaChar->writeValue("END", false);
     delay(100);
     Serial.println("OTA push: Complete — " + String(totalSent) + " bytes sent");
     flashActivity(COLOR_GREEN, 5, 100);
