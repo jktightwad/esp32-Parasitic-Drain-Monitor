@@ -1171,7 +1171,7 @@ void loop() {
     setActivityLED(COLOR_PURPLE);
     checkAndApplyOTA();
     setActivityLED(COLOR_DIM_BLUE);
-    lastOTACheck = millis() + 300000UL; // offset from VoltMon version check
+    lastOTACheck = millis() + 300000UL; // offset from VoltMon version check for OTA
   }
 
   // Idle pulse animation
