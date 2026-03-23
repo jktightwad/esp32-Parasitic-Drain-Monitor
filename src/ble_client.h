@@ -272,10 +272,8 @@ void collectorBleInit() {
 // ===== UPDATE ADVERTISING WITH OTA INFO VIA MANUFACTURER DATA =====
 void bleSetOtaAvailable() {
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
-  advertising->stop();
 
   if (cachedVoltMonVersion.length() > 0 && cachedFirmwareSize > 0) {
-    // Encode: company ID 0xFFFF + major,minor,patch (3 bytes) + size (4 bytes) = 9 bytes
     uint8_t mfData[9];
     mfData[0] = 0xFF;
     mfData[1] = 0xFF;
@@ -294,7 +292,9 @@ void bleSetOtaAvailable() {
     Serial.println("BLE: OTA cleared from advert");
   }
 
-  advertising->start();
+  // Use NimBLEDevice::startAdvertising() — same method used after disconnects
+  // Avoids the stop/start sequence that breaks discoverability
+  NimBLEDevice::startAdvertising();
 }
 
 void bleUpdateAdvertising() {

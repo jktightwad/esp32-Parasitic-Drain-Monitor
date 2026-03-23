@@ -1089,12 +1089,12 @@ void setup() {
   }
 
   collectorBleInit();
-  // Download firmware to partition if available, then advertise
+  // Download firmware to partition if available
   if (cachedVoltMonVersion.length() > 0 && !voltmonFirmwareCached) {
     downloadVoltMonFirmware();
   }
+  // Set OTA manufacturer data once — bleSetOtaAvailable restarts advertising
   bleSetOtaAvailable();
-  bleUpdateAdvertising();
 
   Serial.println("Collector ready — waiting for VoltMon");
   if (cachedVoltMonVersion.length() > 0) {
