@@ -92,7 +92,7 @@ String lastKnownVoltMonVer   = "";  // last version VoltMon reported via BLE
 int parseVersionInt(const String& v) {
   int maj = 0, min = 0, pat = 0;
   sscanf(v.c_str(), "%d.%d.%d", &maj, &min, &pat);
-  return maj * 10000 + min * 100 + pat;
+  return maj * 1000000 + min * 1000 + pat;
 }
 
 // Returns true if vA is strictly newer than vB

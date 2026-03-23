@@ -64,7 +64,7 @@ int parseVersion(String v) {
     minor = v.substring(first + 1, second).toInt();
     patch = v.substring(second + 1).toInt();
   }
-  return major * 10000 + minor * 100 + patch;
+  return major * 1000000 + minor * 1000 + patch;
 }
 
 // ===== DEBUG LOGGING =====
