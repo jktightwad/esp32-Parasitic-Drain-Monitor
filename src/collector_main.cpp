@@ -429,7 +429,7 @@ bool downloadVoltMonFirmware() {
   WiFiClient* stream = http.getStreamPtr();
 
   const size_t BUF_SIZE = 4096;
-  uint8_t      buf[BUF_SIZE];
+  static uint8_t buf[BUF_SIZE];
   size_t       written       = 0;
   uint32_t     offset        = 0;
   unsigned long lastWdog     = millis();
@@ -561,7 +561,7 @@ bool pushOTAToVoltMon() {
   Serial.println("OTA push: Pushing " + String(cachedFirmwareSize) + " bytes...");
 
   const size_t CHUNK_SIZE = 480;
-  uint8_t      buf[CHUNK_SIZE];
+  static uint8_t buf[CHUNK_SIZE];
   size_t       totalSent     = 0;
   uint32_t     offset        = 0;
   unsigned long lastWdog     = millis();
@@ -666,7 +666,7 @@ void streamOTAToVoltMon() {
   setActivityLED(COLOR_PURPLE);
 
   const size_t CHUNK_SIZE = 480;
-  uint8_t      buf[CHUNK_SIZE];
+  static uint8_t buf[CHUNK_SIZE];
   size_t       totalSent   = 0;
   uint32_t     offset      = 0;
   unsigned long lastWdog   = millis();
@@ -1005,7 +1005,7 @@ void checkAndApplyOTA() {
 
   WiFiClient* stream       = http.getStreamPtr();
   size_t written           = 0;
-  uint8_t buf[512];
+  static uint8_t buf[512];
   unsigned long lastFeed     = millis();
   unsigned long lastProgress = millis();
 
