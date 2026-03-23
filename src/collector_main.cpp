@@ -404,7 +404,7 @@ bool downloadVoltMonFirmware() {
   WiFiClient* stream = http.getStreamPtr();
 
   const size_t BUF_SIZE = 4096;
-  static uint8_t buf[BUF_SIZE];
+  uint8_t      buf[BUF_SIZE];
   size_t       written       = 0;
   uint32_t     offset        = 0;
   unsigned long lastWdog     = millis();
@@ -459,6 +459,163 @@ bool downloadVoltMonFirmware() {
   flashActivity(COLOR_GREEN, 3, 100);
   setActivityLED(COLOR_DIM_BLUE);
   return true;
+}
+
+// ===== PUSH OTA FIRMWARE TO VOLTMON =====
+// Collector scans for "VoltMon-OTA", connects as client, writes chunks via WRITE_NR
+// VoltMon is the server — onWrite callback handles each chunk — no drops possible
+bool pushOTAToVoltMon() {
+  if (!voltmonFirmwareCached || cachedFirmwareSize == 0) {
+    Serial.println("OTA push: no firmware cached");
+    return false;
+  }
+
+  const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
+  if (!partition) {
+    Serial.println("OTA push: partition not found");
+    return false;
+  }
+
+  Serial.println("OTA push: scanning for VoltMon-OTA...");
+  setActivityLED(COLOR_PURPLE);
+
+  // Stop advertising while we scan — can't advertise and scan simultaneously
+  NimBLEDevice::getAdvertising()->stop();
+
+  // Give VoltMon time to start advertising
+  delay(2000);
+
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  scan->setActiveScan(true);
+  scan->setInterval(100);
+  scan->setWindow(90);
+  NimBLEScanResults results = scan->start(8, false);
+
+  NimBLEAdvertisedDevice* voltmon = nullptr;
+  for (int i = 0; i < results.getCount(); i++) {
+    NimBLEAdvertisedDevice device = results.getDevice(i);
+    if (String(device.getName().c_str()) == "VoltMon-OTA") {
+      voltmon = new NimBLEAdvertisedDevice(device);
+      Serial.println("OTA push: VoltMon-OTA found");
+      break;
+    }
+  }
+  scan->clearResults();
+
+  if (!voltmon) {
+    Serial.println("OTA push: VoltMon-OTA not found");
+    flashActivity(COLOR_RED, 3, 100);
+    return false;
+  }
+
+  NimBLEClient* client = NimBLEDevice::createClient();
+  bool connected = client->connect(voltmon);
+  delete voltmon; voltmon = nullptr;
+
+  if (!connected) {
+    Serial.println("OTA push: Connection failed");
+    NimBLEDevice::deleteClient(client);
+    return false;
+  }
+  Serial.println("OTA push: Connected to VoltMon");
+
+  NimBLERemoteService* service = client->getService(BLE_SERVICE_UUID);
+  if (!service) {
+    client->disconnect(); NimBLEDevice::deleteClient(client); return false;
+  }
+
+  NimBLERemoteCharacteristic* otaChar = service->getCharacteristic(BLE_OTA_CHAR_UUID);
+  if (!otaChar) {
+    Serial.println("OTA push: OTA characteristic not found");
+    client->disconnect(); NimBLEDevice::deleteClient(client); return false;
+  }
+
+  // Extended connection params for long transfer
+  client->setConnectionParams(6, 6, 0, 600);
+
+  Serial.println("OTA push: Pushing " + String(cachedFirmwareSize) + " bytes...");
+
+  const size_t CHUNK_SIZE = 480;
+  uint8_t      buf[CHUNK_SIZE];
+  size_t       totalSent     = 0;
+  uint32_t     offset        = 0;
+  unsigned long lastWdog     = millis();
+  unsigned long lastProgress = millis();
+
+  while (totalSent < cachedFirmwareSize && client->isConnected()) {
+    size_t remaining = cachedFirmwareSize - totalSent;
+    size_t toRead    = min(remaining, CHUNK_SIZE);
+
+    esp_err_t err = esp_partition_read(partition, offset, buf, toRead);
+    if (err != ESP_OK) {
+      Serial.println("OTA push: read failed at " + String(offset));
+      break;
+    }
+
+    // WRITE_NR — no response needed, VoltMon onWrite fires for every packet
+    if (!otaChar->writeValue(buf, toRead, false)) {
+      // Brief backoff if write fails — BLE queue may be full
+      delay(10);
+      if (!otaChar->writeValue(buf, toRead, false)) {
+        Serial.println("OTA push: write failed at " + String(totalSent));
+        break;
+      }
+    }
+
+    totalSent += toRead;
+    offset    += toRead;
+
+    // Small delay to let VoltMon process and write to flash
+    delay(5);
+
+    if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
+
+    if (millis() - lastProgress > 10000) {
+      int pct = totalSent * 100 / cachedFirmwareSize;
+      Serial.println("OTA push: " + String(pct) + "% (" +
+                     String(totalSent) + "/" + String(cachedFirmwareSize) + ")");
+      int ledsOn = (totalSent * LED_ACTIVITY_COUNT) / cachedFirmwareSize;
+      for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
+        strip.setPixelColor(i, (i - LED_ACTIVITY_START) < ledsOn ? COLOR_PURPLE : COLOR_OFF);
+      }
+      strip.show();
+      lastProgress = millis();
+    }
+  }
+
+  bool success = (totalSent >= cachedFirmwareSize);
+
+  if (success) {
+    // Send END marker
+    otaChar->writeValue("END", 3, false);
+    delay(100);
+    Serial.println("OTA push: Complete — " + String(totalSent) + " bytes sent");
+    flashActivity(COLOR_GREEN, 5, 100);
+    // Clear cache
+    voltmonFirmwareCached = false;
+    cachedVoltMonVersion  = "";
+    cachedFirmwareSize    = 0;
+    saveVoltMonCache();
+    bleSetOtaAvailable();
+    if (connectMQTT()) {
+      feedDebug->publish(("OTA_PUSH_OK_to_" + bleOtaTargetDevice()).c_str());
+      mqtt.disconnect();
+    }
+  } else {
+    Serial.println("OTA push: Incomplete — " + String(totalSent) +
+                   "/" + String(cachedFirmwareSize));
+    flashActivity(COLOR_RED, 5, 100);
+  }
+
+  client->disconnect();
+  NimBLEDevice::deleteClient(client);
+
+  // Restart collector advertising
+  NimBLEDevice::getAdvertising()->start();
+  Serial.println("OTA push: collector advertising restarted");
+
+  setActivityLED(COLOR_DIM_BLUE);
+  return success;
 }
 
 void streamOTAToVoltMon() {
@@ -968,12 +1125,13 @@ void loop() {
     setActivityLED(COLOR_DIM_BLUE);
   }
 
-  // OTA stream — triggered by VoltMon's dedicated second connection sending OTA_READY
-  if (bleOtaReadyReceived() && collectorConnected && wifiConnected) {
+  // OTA push — VoltMon has switched to server mode advertising "VoltMon-OTA"
+  // Collector scans, connects as client, pushes chunks via WRITE_NR
+  if (bleOtaReadyReceived()) {
     bleOtaClearReady();
     bleOtaClearPending();
-    Serial.println("OTA stream: starting firmware stream to " + bleOtaTargetDevice());
-    streamOTAToVoltMon();
+    Serial.println("OTA push: VoltMon in server mode — pushing firmware");
+    pushOTAToVoltMon();
     setActivityLED(COLOR_DIM_BLUE);
   }
 
@@ -1013,7 +1171,7 @@ void loop() {
     setActivityLED(COLOR_PURPLE);
     checkAndApplyOTA();
     setActivityLED(COLOR_DIM_BLUE);
-    lastOTACheck = millis(); // offset from VoltMon version check
+    lastOTACheck = millis() + 300000UL; // offset from VoltMon version check
   }
 
   // Idle pulse animation

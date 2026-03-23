@@ -296,6 +296,16 @@ void bleUpdateAdvertising() {
   bleSetOtaAvailable();
 }
 
+// ===== OTA PUSH PENDING =====
+// Set when VoltMon has switched to server mode and is advertising "VoltMon-OTA"
+static bool otaPushPending   = false;
+static size_t otaPushSize    = 0;
+
+void bleSetOtaPushPending(size_t size) {
+  otaPushPending = true;
+  otaPushSize    = size;
+}
+
 // ===== COMMAND / DATA ACCESSORS =====
 void   bleSetPendingCommand(const String& cmd) { pendingCommand = cmd; }
 bool   bleDataReceived()     { return collectorDataReceived; }
@@ -310,6 +320,9 @@ bool   bleOtaAckReceived()   { return otaAckReceived; }
 void   bleOtaClearAck()      { otaAckReceived = false; }
 bool   bleOtaNextRequested() { return otaNextRequested; }
 void   bleOtaClearNext()     { otaNextRequested = false; }
+bool   bleOtaPushIsPending() { return otaPushPending; }
+size_t bleOtaPushGetSize()   { return otaPushSize; }
+void   bleOtaPushClear()     { otaPushPending = false; otaPushSize = 0; }
 String bleOtaTargetDevice()  { return otaTargetDevice; }
 
 void bleClearReceived() {
