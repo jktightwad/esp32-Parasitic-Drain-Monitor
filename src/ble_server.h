@@ -1,16 +1,8 @@
 #pragma once
-extern RTC_DS3231 rtc;
-#define TSLOG(x) do { \
-  DateTime _t = rtc.now(); \
-  char _tbuf[12]; \
-  snprintf(_tbuf, sizeof(_tbuf), "%02d:%02d:%02d ", _t.hour(), _t.minute(), _t.second()); \
-  Serial.print(_tbuf); \
-  Serial.println(x); \
-} while(0)
+#define TSLOG(x) do { Serial.print(String(millis()) + "ms "); Serial.println(x); } while(0)
 
 
 #include <NimBLEDevice.h>
-#include <RTClib.h>
 #include <LittleFS.h>
 #include "config.h"
 #include "storage.h"
@@ -109,6 +101,7 @@ static bool doOtaServerMode(size_t firmwareSize) {
   }
 
   // Partition already erased before disconnecting from collector
+  esp_err_t err = ESP_OK;
   otaServerReceived = 0;
   otaServerDone     = false;
   otaWriteOffset    = 0;

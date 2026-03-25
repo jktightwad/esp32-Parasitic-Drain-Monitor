@@ -1,10 +1,15 @@
 #include "Arduino.h"
 
+static bool _rtcReady = false;
 #define TSLOG(x) do { \
-  DateTime _t = rtc.now(); \
-  char _tbuf[12]; \
-  snprintf(_tbuf, sizeof(_tbuf), "%02d:%02d:%02d ", _t.hour(), _t.minute(), _t.second()); \
-  Serial.print(_tbuf); \
+  if (_rtcReady) { \
+    DateTime _t = rtc.now(); \
+    char _tbuf[12]; \
+    snprintf(_tbuf, sizeof(_tbuf), "%02d:%02d:%02d ", _t.hour(), _t.minute(), _t.second()); \
+    Serial.print(_tbuf); \
+  } else { \
+    Serial.print(String(millis()) + "ms "); \
+  } \
   Serial.println(x); \
 } while(0)
 #include <WiFi.h>
@@ -948,7 +953,8 @@ void setup() {
                             ADC_WIDTH_BIT_12, 1100, &adc_chars);
 
   Wire.begin(PIN_DS3231_SDA, PIN_DS3231_SCL);
-  if (!rtc.begin()) TSLOG("WARNING: DS3231 not found");
+  if (!rtc.begin()) { Serial.println("WARNING: DS3231 not found"); }
+  else { _rtcReady = true; }
 
   if (!LittleFS.begin(true)) {
     TSLOG("ERROR: LittleFS failed");
