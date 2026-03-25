@@ -1164,12 +1164,12 @@ void loop() {
     setActivityLED(COLOR_DIM_BLUE);
   }
 
-  // OTA push — VoltMon has switched to server mode advertising "VoltMon-OTA"
-  // Collector scans, connects as client, pushes chunks via WRITE_NR
-  if (bleOtaReadyReceived()) {
-    bleOtaClearReady();
+// OTA push — VoltMon switches to server mode after records transfer
+  // Triggered by otaStreamPending which is set during the records connection
+  if (bleOtaStreamPending() && !collectorConnected && wifiConnected) {
     bleOtaClearPending();
-    Serial.println("OTA push: VoltMon in server mode — pushing firmware");
+    bleOtaClearReady();
+    Serial.println("OTA push: scanning for VoltMon-OTA server...");
     pushOTAToVoltMon();
     setActivityLED(COLOR_DIM_BLUE);
   }
