@@ -3,10 +3,10 @@
 #include "secrets.h"
 
 // ===== VOLTMON VERSION =====
-#define VOLTMON_VERSION     "2.2.72"
+#define VOLTMON_VERSION     "2.2.73"
 
 // ===== COLLECTOR VERSION =====
-#define COLLECTOR_VERSION   "1.2.5"
+#define COLLECTOR_VERSION   "1.2.6"
 
 // ===== VOLTMON OTA =====
 #define VOLTMON_OTA_VERSION_URL  "https://raw.githubusercontent.com/jktightwad/esp32-Parasitic-Drain-Monitor/main/firmware/voltmon/version.txt"

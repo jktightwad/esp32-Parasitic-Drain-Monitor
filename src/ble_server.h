@@ -1,6 +1,16 @@
 #pragma once
+extern RTC_DS3231 rtc;
+#define TSLOG(x) do { \
+  DateTime _t = rtc.now(); \
+  char _tbuf[12]; \
+  snprintf(_tbuf, sizeof(_tbuf), "%02d:%02d:%02d ", _t.hour(), _t.minute(), _t.second()); \
+  Serial.print(_tbuf); \
+  Serial.println(x); \
+} while(0)
+
 
 #include <NimBLEDevice.h>
+#include <RTClib.h>
 #include <LittleFS.h>
 #include "config.h"
 #include "storage.h"
@@ -86,27 +96,19 @@ class OtaWriteCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 static bool doOtaServerMode(size_t firmwareSize) {
-  Serial.println("BLE OTA: Server mode — advertising VoltMon-OTA");
+  TSLOG("BLE OTA: Server mode — advertising VoltMon-OTA");
 
   otaPartition = esp_ota_get_next_update_partition(NULL);
   if (!otaPartition) {
-    Serial.println("BLE OTA: No inactive partition");
+    TSLOG("BLE OTA: No inactive partition");
     return false;
   }
   if (firmwareSize > otaPartition->size) {
-    Serial.println("BLE OTA: Firmware too large");
+    TSLOG("BLE OTA: Firmware too large");
     return false;
   }
 
-  // Erase partition
-  esp_task_wdt_deinit();
-  esp_err_t err = esp_partition_erase_range(otaPartition, 0, otaPartition->size);
-  esp_task_wdt_init(120, false);
-  if (err != ESP_OK) {
-    Serial.println("BLE OTA: Erase failed");
-    return false;
-  }
-
+  // Partition already erased before disconnecting from collector
   otaServerReceived = 0;
   otaServerDone     = false;
   otaWriteOffset    = 0;
@@ -133,7 +135,7 @@ static bool doOtaServerMode(size_t firmwareSize) {
   adv->setScanResponse(true);
   adv->start();
 
-  Serial.println("BLE OTA: Waiting for collector to connect and push firmware..");
+  TSLOG("BLE OTA: Waiting for collector to connect and push firmware...");
 
   unsigned long otaStart = millis();
   unsigned long lastLog  = millis();
@@ -146,7 +148,7 @@ static bool doOtaServerMode(size_t firmwareSize) {
       lastWdog = millis();
     }
     if (millis() - lastLog > 10000) {
-      Serial.println("BLE OTA: " +
+      TSLOG("BLE OTA: " +
                      String(otaServerReceived * 100 / firmwareSize) + "% (" +
                      String(otaServerReceived) + "/" + String(firmwareSize) + ")");
       lastLog = millis();
@@ -157,19 +159,19 @@ static bool doOtaServerMode(size_t firmwareSize) {
   NimBLEDevice::deinit(true);
 
   if (!otaServerDone || otaServerReceived < firmwareSize) {
-    Serial.println("BLE OTA: Failed — received " +
+    TSLOG("BLE OTA: Failed — received " +
                    String(otaServerReceived) + "/" + String(firmwareSize));
     return false;
   }
 
-  Serial.println("BLE OTA: All bytes received — setting boot partition");
+  TSLOG("BLE OTA: All bytes received — setting boot partition");
   err = esp_ota_set_boot_partition(otaPartition);
   if (err != ESP_OK) {
-    Serial.println("BLE OTA: Set boot failed");
+    TSLOG("BLE OTA: Set boot failed");
     return false;
   }
 
-  Serial.println("BLE OTA: Success — rebooting");
+  TSLOG("BLE OTA: Success — rebooting");
   delay(500);
   esp_restart();
   return true;  // never reached
@@ -177,7 +179,7 @@ static bool doOtaServerMode(size_t firmwareSize) {
 
 // ===== SCAN FOR COLLECTOR AND TRANSFER =====
 bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
-  Serial.println("BLE: scanning for collector...");
+  TSLOG("BLE: scanning for collector...");
 
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setActiveScan(true);
@@ -205,34 +207,34 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
           memcpy(&sz, &mfData[5], 4);
           char advVer[16];
           snprintf(advVer, sizeof(advVer), "%d.%d.%d", maj, min, pat);
-          Serial.println("BLE: Advert OTA version: " + String(advVer) +
+          TSLOG("BLE: Advert OTA version: " + String(advVer) +
                          " ours: " + String(VOLTMON_VERSION));
           if (String(advVer) != String(VOLTMON_VERSION) && sz > 0) {
             otaSize = (size_t)sz;
           } else {
-            Serial.println("BLE: OTA not needed — already on " + String(VOLTMON_VERSION));
+            TSLOG("BLE: OTA not needed — already on " + String(VOLTMON_VERSION));
           }
         }
       }
-      Serial.println("BLE: Collector found" +
+      TSLOG("BLE: Collector found" +
                      String(otaSize > 0 ? " (OTA available)" : ""));
       break;
     }
   }
   scan->clearResults();
 
-  if (!collector) { Serial.println("BLE: Collector not found"); return false; }
+  if (!collector) { TSLOG("BLE: Collector not found"); return false; }
 
   NimBLEClient* client = NimBLEDevice::createClient();
   bool connected = client->connect(collector);
   delete collector; collector = nullptr;
 
   if (!connected) {
-    Serial.println("BLE: Connection failed");
+    TSLOG("BLE: Connection failed");
     NimBLEDevice::deleteClient(client);
     return false;
   }
-  Serial.println("BLE: Connected to collector");
+  TSLOG("BLE: Connected to collector");
 
   NimBLERemoteService* service = client->getService(BLE_SERVICE_UUID);
   if (!service) {
@@ -243,7 +245,7 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
   NimBLERemoteCharacteristic* deviceIdChar = service->getCharacteristic(BLE_DEVICE_ID_CHAR_UUID);
 
   if (!recordsChar || !deviceIdChar) {
-    Serial.println("BLE: Required characteristics not found");
+    TSLOG("BLE: Required characteristics not found");
     client->disconnect(); NimBLEDevice::deleteClient(client); return false;
   }
 
@@ -254,9 +256,9 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     String records = loadPendingRecords();
     if (records.length() > 0) {
       recordsChar->writeValue((String(cfg.deviceName) + "|" + records).c_str(), true);
-      Serial.println("BLE: Sent " + String(records.length()) + " bytes");
+      TSLOG("BLE: Sent " + String(records.length()) + " bytes");
       transferOk = true;
-      Serial.println("BLE: Transfer accepted");
+      TSLOG("BLE: Transfer accepted");
     } else {
       recordsChar->writeValue("EMPTY", true);
       transferOk = true;
@@ -266,14 +268,26 @@ bool bleScanAndTransfer(DeviceConfig& cfg, bool hasRecords) {
     transferOk = true;
   }
 
+  // If OTA needed, erase partition NOW while still connected to collector
+  // This takes ~9 seconds — do it before disconnecting so server mode starts fast
+  if (otaSize > 0) {
+    const esp_partition_t* part = esp_ota_get_next_update_partition(NULL);
+    if (part && otaSize <= part->size) {
+      TSLOG("BLE OTA: Pre-erasing partition while connected...");
+      esp_task_wdt_deinit();
+      esp_partition_erase_range(part, 0, part->size);
+      esp_task_wdt_init(120, false);
+      TSLOG("BLE OTA: Partition erased — disconnecting");
+    }
+  }
+
   client->disconnect();
   NimBLEDevice::deleteClient(client);
-  Serial.println("BLE: Transfer done — success: " + String(transferOk));
+  TSLOG("BLE: Transfer done — success: " + String(transferOk));
 
   // OTA: VoltMon becomes server, collector connects and pushes firmware
   if (otaSize > 0) {
-    Serial.println("BLE OTA: Switching to server mode for firmware receive...");
-    delay(500);
+    TSLOG("BLE OTA: Switching to server mode for firmware receive...");
     doOtaServerMode(otaSize);
   }
 

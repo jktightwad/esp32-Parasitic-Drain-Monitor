@@ -1,4 +1,12 @@
 #include "Arduino.h"
+
+#define TSLOG(x) do { \
+  DateTime _t = rtc.now(); \
+  char _tbuf[12]; \
+  snprintf(_tbuf, sizeof(_tbuf), "%02d:%02d:%02d ", _t.hour(), _t.minute(), _t.second()); \
+  Serial.print(_tbuf); \
+  Serial.println(x); \
+} while(0)
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -64,12 +72,12 @@ int parseVersion(String v) {
     minor = v.substring(first + 1, second).toInt();
     patch = v.substring(second + 1).toInt();
   }
-  return major * 1000000 + minor * 1000 + patch;
+  return major * 10000 + minor * 100 + patch;
 }
 
 // ===== DEBUG LOGGING =====
 void debugLog(String msg) {
-  Serial.println(msg);
+  TSLOG(msg);
   if (!fsReady) return;
 
   if (LittleFS.exists(DEBUG_FILE)) {
@@ -100,28 +108,28 @@ void debugLog(String msg) {
 
 void dumpDebugLog() {
   if (!fsReady || !LittleFS.exists(DEBUG_FILE)) {
-    Serial.println("No debug log found");
+    TSLOG("No debug log found");
     return;
   }
   File f = LittleFS.open(DEBUG_FILE, "r");
   if (!f) return;
-  Serial.println("=== DEBUG LOG ===");
+  TSLOG("=== DEBUG LOG ===");
   while (f.available()) Serial.write(f.read());
   f.close();
-  Serial.println("\n=== END DEBUG LOG ===");
+  TSLOG("\n=== END DEBUG LOG ===");
 }
 
 void dumpPendingFile() {
   if (!fsReady || !LittleFS.exists(PENDING_FILE)) {
-    Serial.println("No pending file found");
+    TSLOG("No pending file found");
     return;
   }
   File f = LittleFS.open(PENDING_FILE, "r");
   if (!f) return;
-  Serial.println("=== PENDING FILE ===");
+  TSLOG("=== PENDING FILE ===");
   while (f.available()) Serial.write(f.read());
   f.close();
-  Serial.println("\n=== END PENDING FILE ===");
+  TSLOG("\n=== END PENDING FILE ===");
 }
 
 // ===== MQTT SETUP =====
@@ -326,10 +334,16 @@ void writePending(DateTime now, float truckVolts, float battVolts, bool charging
     }
   }
 
-File f;
+  // Create file if it doesn't exist
+  if (!LittleFS.exists(PENDING_FILE)) {
+    File init = LittleFS.open(PENDING_FILE, "w");
+    if (init) init.close();
+  }
+
+  File f;
   int retries = 0;
   while (retries < 3) {
-    f = LittleFS.open(PENDING_FILE, "a", true);
+    f = LittleFS.open(PENDING_FILE, "a");
     if (f) break;
     debugLog("Pending open failed — retry " + String(retries + 1));
     delay(1000);
@@ -913,14 +927,14 @@ void setup() {
 
   esp_reset_reason_t reason = esp_reset_reason();
   if (reason != ESP_RST_DEEPSLEEP) {
-    Serial.println("Non-sleep reset — 10s flash window");
+    TSLOG("Non-sleep reset — 10s flash window");
     delay(10000);
   } else {
     delay(5000);
   }
 
   Serial.print("Reset reason: ");
-  Serial.println((int)reason);
+  TSLOG((int)reason);
 
   pinMode(PIN_TRUCK_SOURCE, OUTPUT);
   digitalWrite(PIN_TRUCK_SOURCE, LOW);
@@ -934,29 +948,29 @@ void setup() {
                             ADC_WIDTH_BIT_12, 1100, &adc_chars);
 
   Wire.begin(PIN_DS3231_SDA, PIN_DS3231_SCL);
-  if (!rtc.begin()) Serial.println("WARNING: DS3231 not found");
+  if (!rtc.begin()) TSLOG("WARNING: DS3231 not found");
 
   if (!LittleFS.begin(true)) {
-    Serial.println("ERROR: LittleFS failed");
+    TSLOG("ERROR: LittleFS failed");
     while (1) delay(100);
   }
   fsReady = true;
 
   File testFile = LittleFS.open("/fstest", "w");
   if (!testFile) {
-    Serial.println("LittleFS not writable — reformatting...");
+    TSLOG("LittleFS not writable — reformatting...");
     fsReady = false;
     LittleFS.end();
     LittleFS.format();
     if (!LittleFS.begin(true)) {
-      Serial.println("ERROR: LittleFS failed after format");
+      TSLOG("ERROR: LittleFS failed after format");
       while (1) delay(100);
     }
     fsReady = true;
   } else {
     testFile.close();
     LittleFS.remove("/fstest");
-    Serial.println("LittleFS OK");
+    TSLOG("LittleFS OK");
   }
 
   loadConfig(deviceConfig);

@@ -1,10 +1,23 @@
 #pragma once
+#define TSLOG(x) do { \
+  struct tm _ti; \
+  if (getLocalTime(&_ti, 0)) { \
+    char _tbuf[12]; \
+    snprintf(_tbuf, sizeof(_tbuf), "%02d:%02d:%02d ", _ti.tm_hour, _ti.tm_min, _ti.tm_sec); \
+    Serial.print(_tbuf); \
+  } else { \
+    Serial.print(String(millis()) + "ms "); \
+  } \
+  Serial.println(x); \
+} while(0)
+
 
 // ===== BLE CLIENT (Collector side) =====
 // Collector advertises as "VoltMon-Collector"
 // VoltMon connects to it, sends records, receives confirmation
 
 #include <NimBLEDevice.h>
+#include <time.h>
 #include "config.h"
 #include "storage.h"
 
@@ -56,12 +69,12 @@ class CollectorServerCallbacks : public NimBLEServerCallbacks {
     otaReadyReceived       = false;
     resetChunkState();
     // Clear OTA ctrl so VoltMon reads empty unless we set it
-    Serial.println("BLE: VoltMon connected");
+    TSLOG("BLE: VoltMon connected");
   }
 
   void onDisconnect(NimBLEServer* server) override {
     collectorConnected = false;
-    Serial.println("BLE: VoltMon disconnected");
+    TSLOG("BLE: VoltMon disconnected");
     NimBLEDevice::startAdvertising();
   }
 };
@@ -75,7 +88,7 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
 
     // Check for OTA_READY signal from VoltMon — second dedicated OTA connection
     if (s == "OTA_READY") {
-      Serial.println("BLE: VoltMon OTA_READY — starting stream immediately");
+      TSLOG("BLE: VoltMon OTA_READY — starting stream immediately");
       otaReadyReceived = true;
       if (cachedFirmwareSize > 0) {
         otaStreamPending = true;
@@ -96,7 +109,7 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
       receivedDeviceId      = s.substring(0, colonIdx);
       String reportedVersion = s.substring(colonIdx + 1);
 
-      Serial.println("BLE: Device ID: " + receivedDeviceId +
+      TSLOG("BLE: Device ID: " + receivedDeviceId +
                      " v" + reportedVersion);
 
       // Save VoltMon's reported version so collector knows what it currently has
@@ -110,21 +123,21 @@ class DeviceIdCallbacks : public NimBLECharacteristicCallbacks {
           versionNewer(cachedVoltMonVersion, reportedVersion)) {
         otaStreamPending = true;
         otaTargetDevice  = receivedDeviceId;
-        Serial.println("BLE: OTA queued for " + receivedDeviceId +
+        TSLOG("BLE: OTA queued for " + receivedDeviceId +
                        " v" + reportedVersion + " -> " + cachedVoltMonVersion +
                        " (" + String(cachedFirmwareSize) + " bytes)");
       }
     } else {
       // Old format without version — just device name
       receivedDeviceId = s;
-      Serial.println("BLE: Device ID: " + receivedDeviceId + " (no version)");
+      TSLOG("BLE: Device ID: " + receivedDeviceId + " (no version)");
       collectorOtaCtrlChar->setValue("");
     }
 
     // Write any pending command
     if (pendingCommand.length() > 0) {
       collectorOtaCtrlChar->setValue(pendingCommand.c_str());
-      Serial.println("BLE: Command queued: " + pendingCommand);
+      TSLOG("BLE: Command queued: " + pendingCommand);
       pendingCommand = "";
     }
   }
@@ -137,7 +150,7 @@ static void setConfirmValue(const String& base) {
     String otaConfirm = "OTA_START:" + String(cachedFirmwareSize);
     collectorConfirmChar->setValue(otaConfirm.c_str());
     collectorConfirmChar->notify();
-    Serial.println("BLE: Confirm piggybacked with OTA signal: " + otaConfirm);
+    TSLOG("BLE: Confirm piggybacked with OTA signal: " + otaConfirm);
   } else {
     collectorConfirmChar->setValue(base.c_str());
     collectorConfirmChar->notify();
@@ -152,7 +165,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
     val.trim();
 
     if (val == "EMPTY") {
-      Serial.println("BLE: VoltMon has no records");
+      TSLOG("BLE: VoltMon has no records");
       receivedEmpty         = true;
       collectorDataReceived = true;
       setConfirmValue("OK");
@@ -161,7 +174,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
 
     if (val == "TRANSFER_COMPLETE") {
       if (receivedChunks == expectedChunks && expectedChunks > 0) {
-        Serial.println("BLE: Transfer complete — " + String(chunkBuffer.length()) + " bytes");
+        TSLOG("BLE: Transfer complete — " + String(chunkBuffer.length()) + " bytes");
         int firstPipe = chunkBuffer.indexOf('|');
         if (firstPipe > 0) {
           receivedDeviceId = chunkBuffer.substring(0, firstPipe);
@@ -172,7 +185,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
         collectorDataReceived = true;
         setConfirmValue("OK");
       } else {
-        Serial.println("BLE: Transfer incomplete — expected " +
+        TSLOG("BLE: Transfer incomplete — expected " +
                        String(expectedChunks) + " got " + String(receivedChunks));
         collectorConfirmChar->setValue("FAIL");
       }
@@ -197,7 +210,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
         receivedChunks++;
       }
 
-      Serial.println("BLE: Chunk " + String(seq + 1) + "/" + String(total));
+      TSLOG("BLE: Chunk " + String(seq + 1) + "/" + String(total));
       return;
     }
 
@@ -211,7 +224,7 @@ class RecordsCallbacks : public NimBLECharacteristicCallbacks {
     }
     collectorDataReceived = true;
     setConfirmValue("OK");
-    Serial.println("BLE: Records received — " + String(receivedRecords.length()) + " bytes");
+    TSLOG("BLE: Records received — " + String(receivedRecords.length()) + " bytes");
   }
 };
 
@@ -267,7 +280,7 @@ void collectorBleInit() {
   advertising->addServiceUUID(BLE_SERVICE_UUID);
   advertising->setScanResponse(true);
 
-  Serial.println("BLE: Collector BLE server ready");
+  TSLOG("BLE: Collector BLE server ready");
 }
 
 // ===== UPDATE ADVERTISING WITH OTA INFO VIA MANUFACTURER DATA =====
@@ -286,11 +299,11 @@ void bleSetOtaAvailable() {
     uint32_t sz = (uint32_t)cachedFirmwareSize;
     memcpy(&mfData[5], &sz, 4);
     advertising->setManufacturerData(std::string((char*)mfData, 9));
-    Serial.println("BLE: OTA in advert: v" + cachedVoltMonVersion +
+    TSLOG("BLE: OTA in advert: v" + cachedVoltMonVersion +
                    " size=" + String(cachedFirmwareSize));
   } else {
     advertising->setManufacturerData("");
-    Serial.println("BLE: OTA cleared from advert");
+    TSLOG("BLE: OTA cleared from advert");
   }
 
   // Use NimBLEDevice::startAdvertising() — same method used after disconnects

@@ -1,4 +1,16 @@
 #include "Arduino.h"
+
+#define TSLOG(x) do { \
+  struct tm _ti; \
+  if (getLocalTime(&_ti, 0)) { \
+    char _tbuf[12]; \
+    snprintf(_tbuf, sizeof(_tbuf), "%02d:%02d:%02d ", _ti.tm_hour, _ti.tm_min, _ti.tm_sec); \
+    Serial.print(_tbuf); \
+  } else { \
+    Serial.print(String(millis()) + "ms "); \
+  } \
+  Serial.println(x); \
+} while(0)
 #include <WiFi.h>
 #include "esp_partition.h"
 #include "esp_ota_ops.h"
@@ -120,7 +132,7 @@ void loadVoltMonCache() {
   voltmonFirmwareCached = (cached == "1");
   lastKnownVoltMonVer  = f.readStringUntil('\n'); lastKnownVoltMonVer.trim();
   f.close();
-  Serial.println("VoltMon cache: firmware=v" + cachedVoltMonVersion +
+  TSLOG("VoltMon cache: firmware=v" + cachedVoltMonVersion +
                  " lastSeen=v" + lastKnownVoltMonVer +
                  " cached=" + String(voltmonFirmwareCached ? "yes" : "no"));
 }
@@ -179,7 +191,7 @@ bool initFS() {
   File pf = LittleFS.open(COLLECTOR_PENDING_FILE, "r");
   if (pf && pf.size() > 0) {
     hasPendingBuffer = true;
-    Serial.println("Found existing pending buffer — " + String(pf.size()) + " bytes");
+    TSLOG("Found existing pending buffer — " + String(pf.size()) + " bytes");
   }
   if (pf) pf.close();
 
@@ -214,7 +226,7 @@ void setupMQTT() {
 
 // ===== WIFI =====
 bool connectWiFi() {
-  Serial.println("WiFi connecting...");
+  TSLOG("WiFi connecting...");
   setWiFiLED(COLOR_YELLOW);
 
   WiFi.persistent(false);
@@ -230,14 +242,14 @@ bool connectWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected: " + WiFi.localIP().toString() +
+    TSLOG("WiFi connected: " + WiFi.localIP().toString() +
                    " RSSI:" + String(WiFi.RSSI()));
     setWiFiLED(COLOR_GREEN);
     wifiConnected = true;
     return true;
   }
 
-  Serial.println("WiFi failed — status: " + String(WiFi.status()));
+  TSLOG("WiFi failed — status: " + String(WiFi.status()));
   setWiFiLED(COLOR_RED);
   wifiConnected = false;
   return false;
@@ -250,7 +262,7 @@ void maintainWiFi() {
   if (WiFi.status() != WL_CONNECTED) {
     wifiConnected = false;
     setWiFiLED(COLOR_YELLOW);
-    Serial.println("WiFi lost — reconnecting...");
+    TSLOG("WiFi lost — reconnecting...");
     WiFi.disconnect();
     delay(1000);
     if (connectWiFi() && cachedVoltMonVersion.length() == 0) {
@@ -282,7 +294,7 @@ bool connectMQTT() {
 void checkVoltMonFirmwareVersion() {
   if (!wifiConnected) return;
 
-  Serial.println("Checking VoltMon firmware version...");
+  TSLOG("Checking VoltMon firmware version...");
 
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
@@ -297,7 +309,7 @@ void checkVoltMonFirmwareVersion() {
   feedWatchdog();
 
   if (httpCode != 200) {
-    Serial.println("VoltMon version check failed — HTTP " + String(httpCode));
+    TSLOG("VoltMon version check failed — HTTP " + String(httpCode));
     http.end();
     return;
   }
@@ -309,14 +321,14 @@ void checkVoltMonFirmwareVersion() {
   // Only download if GitHub version is newer than what VoltMon last reported
   if (lastKnownVoltMonVer.length() > 0 &&
       !versionNewer(remoteVersion, lastKnownVoltMonVer)) {
-    Serial.println("VoltMon on v" + lastKnownVoltMonVer +
+    TSLOG("VoltMon on v" + lastKnownVoltMonVer +
                    " — GitHub v" + remoteVersion + " not newer, skipping");
     return;
   }
 
   // Already have this version downloaded
   if (remoteVersion == cachedVoltMonVersion && cachedFirmwareSize > 0 && voltmonFirmwareCached) {
-    Serial.println("VoltMon firmware already downloaded: v" + remoteVersion);
+    TSLOG("VoltMon firmware already downloaded: v" + remoteVersion);
     bleSetOtaAvailable();
     return;
   }
@@ -339,19 +351,19 @@ void checkVoltMonFirmwareVersion() {
       cachedVoltMonVersion = remoteVersion;
       cachedFirmwareSize   = (size_t)size;
       if (versionChanged) voltmonFirmwareCached = false;
-      Serial.println("VoltMon firmware cached: v" + cachedVoltMonVersion +
+      TSLOG("VoltMon firmware cached: v" + cachedVoltMonVersion +
                      " size=" + String(cachedFirmwareSize) + " bytes");
       if (versionChanged || !voltmonFirmwareCached) {
-        Serial.println("VoltMon firmware changed — downloading to partition...");
+        TSLOG("VoltMon firmware changed — downloading to partition...");
         downloadVoltMonFirmware();
       }
       bleSetOtaAvailable();
     } else {
-      Serial.println("VoltMon firmware size unknown");
+      TSLOG("VoltMon firmware size unknown");
       http.end();
     }
   } else {
-    Serial.println("VoltMon firmware fetch failed — HTTP " + String(httpCode));
+    TSLOG("VoltMon firmware fetch failed — HTTP " + String(httpCode));
     http.end();
   }
 }
@@ -360,38 +372,38 @@ void checkVoltMonFirmwareVersion() {
 // ===== DOWNLOAD VOLTMON FIRMWARE TO INACTIVE OTA PARTITION =====
 bool downloadVoltMonFirmware() {
   if (cachedFirmwareSize == 0 || cachedVoltMonVersion.length() == 0) {
-    Serial.println("OTA download: no firmware version cached");
+    TSLOG("OTA download: no firmware version cached");
     return false;
   }
 
   // Get the inactive OTA partition — safe to write to
   const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
   if (!partition) {
-    Serial.println("OTA download: no inactive partition found");
+    TSLOG("OTA download: no inactive partition found");
     return false;
   }
 
-  Serial.println("OTA download: target partition: " + String(partition->label) +
+  TSLOG("OTA download: target partition: " + String(partition->label) +
                  " size=" + String(partition->size));
 
   // Stop BLE advertising during download — WiFi and BLE share radio on ESP32-C3
   // Heavy WiFi traffic kills BLE advertising reliability
   NimBLEDevice::getAdvertising()->stop();
-  Serial.println("OTA download: BLE advertising paused");
+  TSLOG("OTA download: BLE advertising paused");
 
   if (cachedFirmwareSize > partition->size) {
-    Serial.println("OTA download: firmware too large for partition");
+    TSLOG("OTA download: firmware too large for partition");
     return false;
   }
 
   // Ensure WiFi before long download
   maintainWiFi();
   if (!wifiConnected) {
-    Serial.println("OTA download: WiFi not available");
+    TSLOG("OTA download: WiFi not available");
     return false;
   }
 
-  Serial.println("OTA download: fetching v" + cachedVoltMonVersion + "...");
+  TSLOG("OTA download: fetching v" + cachedVoltMonVersion + "...");
   setActivityLED(COLOR_PURPLE);
 
   WiFiClientSecure secureClient;
@@ -408,27 +420,27 @@ bool downloadVoltMonFirmware() {
   feedWatchdog();
 
   if (httpCode != 200) {
-    Serial.println("OTA download: HTTP failed — " + String(httpCode));
+    TSLOG("OTA download: HTTP failed — " + String(httpCode));
     http.end();
     flashActivity(COLOR_RED);
     return false;
   }
 
   int contentLength = http.getSize();
-  Serial.println("OTA download: content-length=" + String(contentLength));
+  TSLOG("OTA download: content-length=" + String(contentLength));
 
   if (contentLength <= 0 || (size_t)contentLength != cachedFirmwareSize) {
-    Serial.println("OTA download: size mismatch — expected " +
+    TSLOG("OTA download: size mismatch — expected " +
                    String(cachedFirmwareSize) + " got " + String(contentLength));
     http.end();
     return false;
   }
 
   // Erase partition
-  Serial.println("OTA download: erasing partition...");
+  TSLOG("OTA download: erasing partition...");
   esp_err_t err = esp_partition_erase_range(partition, 0, partition->size);
   if (err != ESP_OK) {
-    Serial.println("OTA download: erase failed — " + String(esp_err_to_name(err)));
+    TSLOG("OTA download: erase failed — " + String(esp_err_to_name(err)));
     http.end();
     return false;
   }
@@ -452,7 +464,7 @@ bool downloadVoltMonFirmware() {
 
     err = esp_partition_write(partition, offset, buf, bytesRead);
     if (err != ESP_OK) {
-      Serial.println("OTA download: write failed at " + String(offset));
+      TSLOG("OTA download: write failed at " + String(offset));
       http.end();
       voltmonFirmwareCached = false;
       return false;
@@ -464,7 +476,7 @@ bool downloadVoltMonFirmware() {
     if (millis() - lastWdog > 5000)    { feedWatchdog(); lastWdog = millis(); }
     if (millis() - lastProgress > 5000) {
       int pct = (contentLength > 0) ? (written * 100 / contentLength) : 0;
-      Serial.println("OTA download: " + String(pct) + "% (" +
+      TSLOG("OTA download: " + String(pct) + "% (" +
                      String(written) + "/" + String(contentLength) + ")");
       int ledsOn = (written * LED_ACTIVITY_COUNT) / contentLength;
       for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
@@ -478,7 +490,7 @@ bool downloadVoltMonFirmware() {
   http.end();
 
   if (written != (size_t)contentLength) {
-    Serial.println("OTA download: incomplete — " + String(written) +
+    TSLOG("OTA download: incomplete — " + String(written) +
                    "/" + String(contentLength));
     voltmonFirmwareCached = false;
     NimBLEDevice::getAdvertising()->start();  // resume even on failure
@@ -487,12 +499,12 @@ bool downloadVoltMonFirmware() {
 
   voltmonFirmwareCached = true;
   saveVoltMonCache();
-  Serial.println("OTA download: complete — " + String(written) + " bytes written to " +
+  TSLOG("OTA download: complete — " + String(written) + " bytes written to " +
                  String(partition->label));
 
   // Resume BLE advertising with OTA info
   bleSetOtaAvailable();
-  Serial.println("OTA download: BLE advertising resumed");
+  TSLOG("OTA download: BLE advertising resumed");
   flashActivity(COLOR_GREEN, 3, 100);
   setActivityLED(COLOR_DIM_BLUE);
   return true;
@@ -503,45 +515,57 @@ bool downloadVoltMonFirmware() {
 // VoltMon is the server — onWrite callback handles each chunk — no drops possible
 bool pushOTAToVoltMon() {
   if (!voltmonFirmwareCached || cachedFirmwareSize == 0) {
-    Serial.println("OTA push: no firmware cached");
+    TSLOG("OTA push: no firmware cached");
     return false;
   }
 
   const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
   if (!partition) {
-    Serial.println("OTA push: partition not found");
+    TSLOG("OTA push: partition not found");
     return false;
   }
 
-  Serial.println("OTA push: scanning for VoltMon-OTA...");
+  TSLOG("OTA push: preparing to scan for VoltMon-OTA...");
   setActivityLED(COLOR_PURPLE);
 
-  // Stop advertising while we scan — can't advertise and scan simultaneously
+  // Stop advertising — VoltMon-OTA is not us
   NimBLEDevice::getAdvertising()->stop();
 
-  // Give VoltMon time to start advertising
-  delay(2000);
+  // Give VoltMon time to deinit BLE client, init BLE server, start advertising
+  delay(3000);
 
-  NimBLEScan* scan = NimBLEDevice::getScan();
-  scan->setActiveScan(true);
-  scan->setInterval(100);
-  scan->setWindow(90);
-  NimBLEScanResults results = scan->start(8, false);
-
+  // Scan with retries
   NimBLEAdvertisedDevice* voltmon = nullptr;
-  for (int i = 0; i < results.getCount(); i++) {
-    NimBLEAdvertisedDevice device = results.getDevice(i);
-    if (String(device.getName().c_str()) == "VoltMon-OTA") {
-      voltmon = new NimBLEAdvertisedDevice(device);
-      Serial.println("OTA push: VoltMon-OTA found");
-      break;
+  for (int attempt = 0; attempt < 10 && !voltmon; attempt++) {
+    if (attempt > 0) {
+      TSLOG("OTA push: retry " + String(attempt) + "...");
+      delay(3000);
+    } else {
+      TSLOG("OTA push: scanning for VoltMon-OTA...");
     }
+
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    scan->setActiveScan(true);
+    scan->setInterval(100);
+    scan->setWindow(90);
+    NimBLEScanResults results = scan->start(8, false);
+
+    for (int i = 0; i < results.getCount(); i++) {
+      NimBLEAdvertisedDevice device = results.getDevice(i);
+      if (String(device.getName().c_str()) == "VoltMon-OTA") {
+        voltmon = new NimBLEAdvertisedDevice(device);
+        TSLOG("OTA push: VoltMon-OTA found");
+        break;
+      }
+    }
+    scan->clearResults();
   }
-  scan->clearResults();
 
   if (!voltmon) {
-    Serial.println("OTA push: VoltMon-OTA not found");
+    TSLOG("OTA push: VoltMon-OTA not found after retries");
+    NimBLEDevice::startAdvertising();
     flashActivity(COLOR_RED, 3, 100);
+    setActivityLED(COLOR_DIM_BLUE);
     return false;
   }
 
@@ -550,27 +574,31 @@ bool pushOTAToVoltMon() {
   delete voltmon; voltmon = nullptr;
 
   if (!connected) {
-    Serial.println("OTA push: Connection failed");
+    TSLOG("OTA push: Connection failed");
     NimBLEDevice::deleteClient(client);
+    NimBLEDevice::startAdvertising();
     return false;
   }
-  Serial.println("OTA push: Connected to VoltMon");
+  TSLOG("OTA push: Connected to VoltMon");
 
   NimBLERemoteService* service = client->getService(BLE_SERVICE_UUID);
   if (!service) {
-    client->disconnect(); NimBLEDevice::deleteClient(client); return false;
+    client->disconnect(); NimBLEDevice::deleteClient(client);
+    NimBLEDevice::startAdvertising();
+    return false;
   }
 
   NimBLERemoteCharacteristic* otaChar = service->getCharacteristic(BLE_OTA_CHAR_UUID);
   if (!otaChar) {
-    Serial.println("OTA push: OTA characteristic not found");
-    client->disconnect(); NimBLEDevice::deleteClient(client); return false;
+    TSLOG("OTA push: OTA characteristic not found");
+    client->disconnect(); NimBLEDevice::deleteClient(client);
+    NimBLEDevice::startAdvertising();
+    return false;
   }
 
-  // Extended connection params for long transfer
   client->setConnectionParams(6, 6, 0, 600);
 
-  Serial.println("OTA push: Pushing " + String(cachedFirmwareSize) + " bytes...");
+  TSLOG("OTA push: Pushing " + String(cachedFirmwareSize) + " bytes...");
 
   const size_t CHUNK_SIZE = 480;
   static uint8_t buf[CHUNK_SIZE];
@@ -585,16 +613,14 @@ bool pushOTAToVoltMon() {
 
     esp_err_t err = esp_partition_read(partition, offset, buf, toRead);
     if (err != ESP_OK) {
-      Serial.println("OTA push: read failed at " + String(offset));
+      TSLOG("OTA push: read failed at " + String(offset));
       break;
     }
 
-    // WRITE_NR — no response needed, VoltMon onWrite fires for every packet
     if (!otaChar->writeValue(buf, toRead, false)) {
-      // Brief backoff if write fails — BLE queue may be full
       delay(10);
       if (!otaChar->writeValue(buf, toRead, false)) {
-        Serial.println("OTA push: write failed at " + String(totalSent));
+        TSLOG("OTA push: write failed at " + String(totalSent));
         break;
       }
     }
@@ -602,14 +628,13 @@ bool pushOTAToVoltMon() {
     totalSent += toRead;
     offset    += toRead;
 
-    // Small delay to let VoltMon process and write to flash
     delay(5);
 
     if (millis() - lastWdog > 5000) { feedWatchdog(); lastWdog = millis(); }
 
     if (millis() - lastProgress > 10000) {
       int pct = totalSent * 100 / cachedFirmwareSize;
-      Serial.println("OTA push: " + String(pct) + "% (" +
+      TSLOG("OTA push: " + String(pct) + "% (" +
                      String(totalSent) + "/" + String(cachedFirmwareSize) + ")");
       int ledsOn = (totalSent * LED_ACTIVITY_COUNT) / cachedFirmwareSize;
       for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
@@ -623,24 +648,18 @@ bool pushOTAToVoltMon() {
   bool success = (totalSent >= cachedFirmwareSize);
 
   if (success) {
-    // Send END marker
     otaChar->writeValue("END", false);
-    delay(100);
-    Serial.println("OTA push: Complete — " + String(totalSent) + " bytes sent");
+    delay(500);
+    TSLOG("OTA push: Complete — " + String(totalSent) + " bytes sent");
     flashActivity(COLOR_GREEN, 5, 100);
-    // Clear cache
-    lastKnownVoltMonVer   = cachedVoltMonVersion;  // VoltMon now has this version
+    lastKnownVoltMonVer   = cachedVoltMonVersion;
     voltmonFirmwareCached = false;
     cachedVoltMonVersion  = "";
     cachedFirmwareSize    = 0;
     saveVoltMonCache();
     bleSetOtaAvailable();
-    if (connectMQTT()) {
-      feedDebug->publish(("OTA_PUSH_OK_to_" + bleOtaTargetDevice()).c_str());
-      mqtt.disconnect();
-    }
   } else {
-    Serial.println("OTA push: Incomplete — " + String(totalSent) +
+    TSLOG("OTA push: Incomplete — " + String(totalSent) +
                    "/" + String(cachedFirmwareSize));
     flashActivity(COLOR_RED, 5, 100);
   }
@@ -649,31 +668,35 @@ bool pushOTAToVoltMon() {
   NimBLEDevice::deleteClient(client);
 
   // Restart collector advertising
-  NimBLEDevice::getAdvertising()->start();
-  Serial.println("OTA push: collector advertising restarted");
+  NimBLEDevice::startAdvertising();
+  TSLOG("OTA push: collector advertising restarted");
+
+  if (success && connectMQTT()) {
+    feedDebug->publish(("OTA_PUSH_OK_to_" + bleOtaTargetDevice()).c_str());
+    mqtt.disconnect();
+  }
 
   setActivityLED(COLOR_DIM_BLUE);
   return success;
 }
-
 void streamOTAToVoltMon() {
   if (!voltmonFirmwareCached || cachedFirmwareSize == 0) {
-    Serial.println("OTA stream: no firmware cached — aborting");
+    TSLOG("OTA stream: no firmware cached — aborting");
     return;
   }
 
   const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
   if (!partition) {
-    Serial.println("OTA stream: partition not found");
+    TSLOG("OTA stream: partition not found");
     return;
   }
 
   if (!collectorConnected) {
-    Serial.println("OTA stream: VoltMon not connected");
+    TSLOG("OTA stream: VoltMon not connected");
     return;
   }
 
-  Serial.println("OTA stream: pull mode — " + String(cachedFirmwareSize) +
+  TSLOG("OTA stream: pull mode — " + String(cachedFirmwareSize) +
                  " bytes from " + String(partition->label));
   setActivityLED(COLOR_PURPLE);
 
@@ -696,7 +719,7 @@ void streamOTAToVoltMon() {
     }
 
     if (!bleOtaNextRequested()) {
-      Serial.println("OTA stream: NEXT timeout at " + String(totalSent));
+      TSLOG("OTA stream: NEXT timeout at " + String(totalSent));
       break;
     }
     bleOtaClearNext();
@@ -707,7 +730,7 @@ void streamOTAToVoltMon() {
 
     esp_err_t err = esp_partition_read(partition, offset, buf, toRead);
     if (err != ESP_OK) {
-      Serial.println("OTA stream: partition read failed at " + String(offset));
+      TSLOG("OTA stream: partition read failed at " + String(offset));
       break;
     }
 
@@ -721,7 +744,7 @@ void streamOTAToVoltMon() {
 
     if (millis() - lastProgress > 10000) {
       int pct = totalSent * 100 / cachedFirmwareSize;
-      Serial.println("OTA stream: " + String(pct) + "% (" +
+      TSLOG("OTA stream: " + String(pct) + "% (" +
                      String(totalSent) + "/" + String(cachedFirmwareSize) + ")");
       int ledsOn = (totalSent * LED_ACTIVITY_COUNT) / cachedFirmwareSize;
       for (int i = LED_ACTIVITY_START; i < LED_ACTIVITY_START + LED_ACTIVITY_COUNT; i++) {
@@ -733,7 +756,7 @@ void streamOTAToVoltMon() {
   }
 
   if (totalSent >= cachedFirmwareSize) {
-    Serial.println("OTA stream: Complete — " + String(totalSent) + " bytes sent");
+    TSLOG("OTA stream: Complete — " + String(totalSent) + " bytes sent");
     flashActivity(COLOR_GREEN, 5, 100);
     setUploadLED(COLOR_GREEN);
     lastKnownVoltMonVer   = cachedVoltMonVersion;  // VoltMon now has this version
@@ -747,7 +770,7 @@ void streamOTAToVoltMon() {
       mqtt.disconnect();
     }
   } else {
-    Serial.println("OTA stream: Incomplete — " + String(totalSent) +
+    TSLOG("OTA stream: Incomplete — " + String(totalSent) +
                    "/" + String(cachedFirmwareSize));
     flashActivity(COLOR_RED, 5, 100);
   }
@@ -764,7 +787,7 @@ void bufferRecords(const String& deviceId, const String& records) {
 
   File f = LittleFS.open(COLLECTOR_PENDING_FILE, "a");
   if (!f) {
-    Serial.println("ERROR: Cannot open collector pending for write");
+    TSLOG("ERROR: Cannot open collector pending for write");
     return;
   }
 
@@ -784,7 +807,7 @@ void bufferRecords(const String& deviceId, const String& records) {
   f.close();
 
   hasPendingBuffer = true;
-  Serial.println("Buffered " + String(written) + " records for: " + deviceId);
+  TSLOG("Buffered " + String(written) + " records for: " + deviceId);
 }
 
 // ===== UPLOAD BUFFERED RECORDS =====
@@ -847,7 +870,7 @@ bool uploadBuffered() {
   bool allOk = true;
 
   for (int g = 0; g < groupCount; g++) {
-    Serial.println("Uploading " + String(groups[g].count) +
+    TSLOG("Uploading " + String(groups[g].count) +
                    " records for: " + groups[g].deviceId);
 
     String payload = "device=" + groups[g].deviceId + "&d=" + groups[g].compact;
@@ -868,7 +891,7 @@ bool uploadBuffered() {
     String response = http.getString();
     http.end();
 
-    Serial.println("HTTP " + String(httpCode) + " — " + response.substring(0, 80));
+    TSLOG("HTTP " + String(httpCode) + " — " + response.substring(0, 80));
 
     if (response.indexOf("\"ok\"") < 0) {
       allOk = false;
@@ -878,10 +901,10 @@ bool uploadBuffered() {
   if (allOk) {
     LittleFS.remove(COLLECTOR_PENDING_FILE);
     hasPendingBuffer = false;
-    Serial.println("All records uploaded and buffer cleared");
+    TSLOG("All records uploaded and buffer cleared");
     setUploadLED(COLOR_GREEN);
   } else {
-    Serial.println("Some uploads failed — keeping buffer");
+    TSLOG("Some uploads failed — keeping buffer");
     setUploadLED(COLOR_RED);
   }
 
@@ -929,7 +952,7 @@ void checkControlMessages() {
     if (feedControl->lastread[0] != 0) {
       String cmd = String((char*)feedControl->lastread);
       cmd.trim();
-      Serial.println("Control message: " + cmd);
+      TSLOG("Control message: " + cmd);
       memset(feedControl->lastread, 0, sizeof(feedControl->lastread));
 
       if (cmd.startsWith("debug=on")) {
@@ -942,7 +965,7 @@ void checkControlMessages() {
         String value  = (colonIdx > 0) ? cmd.substring(6, colonIdx) : cmd.substring(6);
         bleSetPendingCommand("SLEEP:" + value);
       } else if (cmd == "reboot") {
-        Serial.println("Reboot command received");
+        TSLOG("Reboot command received");
         delay(500);
         ESP.restart();
       }
@@ -955,7 +978,7 @@ void checkControlMessages() {
 
 // ===== COLLECTOR OTA =====
 void checkAndApplyOTA() {
-  Serial.println("Checking collector OTA...");
+  TSLOG("Checking collector OTA...");
 
   WiFiClientSecure secureClient;
   secureClient.setInsecure();
@@ -970,7 +993,7 @@ void checkAndApplyOTA() {
   feedWatchdog();
 
   if (httpCode != 200) {
-    Serial.println("OTA version check failed — HTTP " + String(httpCode));
+    TSLOG("OTA version check failed — HTTP " + String(httpCode));
     http.end();
     return;
   }
@@ -982,12 +1005,12 @@ void checkAndApplyOTA() {
   int localVer  = parseVersion(String(COLLECTOR_VERSION));
   int remoteVer = parseVersion(remoteVersion);
 
-  Serial.println("Collector local: " + String(COLLECTOR_VERSION) +
+  TSLOG("Collector local: " + String(COLLECTOR_VERSION) +
                  " remote: " + remoteVersion);
 
-  if (remoteVer <= localVer) { Serial.println("Collector v" + String(COLLECTOR_VERSION) + " up to date"); return; }
+  if (remoteVer <= localVer) { TSLOG("Collector v" + String(COLLECTOR_VERSION) + " up to date"); return; }
 
-  Serial.println("Updating collector to " + remoteVersion + "...");
+  TSLOG("Updating collector to " + remoteVersion + "...");
   setActivityLED(COLOR_PURPLE);
   esp_task_wdt_init(300, false);
 
@@ -1000,7 +1023,7 @@ void checkAndApplyOTA() {
   feedWatchdog();
 
   if (httpCode != 200) {
-    Serial.println("OTA download failed — HTTP " + String(httpCode));
+    TSLOG("OTA download failed — HTTP " + String(httpCode));
     http.end();
     esp_task_wdt_init(120, false);
     flashActivity(COLOR_RED);
@@ -1009,7 +1032,7 @@ void checkAndApplyOTA() {
 
   int contentLength = http.getSize();
   if (contentLength <= 0 || !Update.begin(contentLength)) {
-    Serial.println("OTA begin failed");
+    TSLOG("OTA begin failed");
     http.end();
     esp_task_wdt_init(120, false);
     return;
@@ -1042,13 +1065,13 @@ void checkAndApplyOTA() {
   http.end();
 
   if (written != (size_t)contentLength || !Update.end(true)) {
-    Serial.println("OTA failed");
+    TSLOG("OTA failed");
     Update.abort();
     esp_task_wdt_init(120, false);
     return;
   }
 
-  Serial.println("Collector OTA success — rebooting into " + remoteVersion);
+  TSLOG("Collector OTA success — rebooting into " + remoteVersion);
   flashActivity(COLOR_GREEN, 5, 100);
   delay(500);
   ESP.restart();
@@ -1060,7 +1083,7 @@ void setup() {
   esp_task_wdt_init(120, false);
   delay(2000);
 
-  Serial.println("\n=== VoltMon Collector v" + String(COLLECTOR_VERSION) + " ===");
+  TSLOG("\n=== VoltMon Collector v" + String(COLLECTOR_VERSION) + " ===");
 
   strip.begin();
   strip.setBrightness(VM_NEOPIXEL_BRIGHTNESS);
@@ -1082,15 +1105,15 @@ void setup() {
 
   fsReady = initFS();
   if (!fsReady) {
-    Serial.println("FATAL: LittleFS failed");
+    TSLOG("FATAL: LittleFS failed");
     setActivityLED(COLOR_RED);
     while (1) delay(1000);
   }
-  Serial.println("LittleFS OK");
+  TSLOG("LittleFS OK");
   loadVoltMonCache();
 
   if (!connectWiFi()) {
-    Serial.println("WARNING: WiFi failed on startup — will retry in loop");
+    TSLOG("WARNING: WiFi failed on startup — will retry in loop");
   }
 
   setupMQTT();
@@ -1108,9 +1131,9 @@ void setup() {
   // Start BLE advertising AFTER WiFi work is done — shared radio on ESP32-C3
   bleSetOtaAvailable();
 
-  Serial.println("Collector ready — waiting for VoltMon");
+  TSLOG("Collector ready — waiting for VoltMon");
   if (cachedVoltMonVersion.length() > 0) {
-    Serial.println("VoltMon firmware cached: v" + cachedVoltMonVersion +
+    TSLOG("VoltMon firmware cached: v" + cachedVoltMonVersion +
                    " (" + String(cachedFirmwareSize) + " bytes)");
   }
   setActivityLED(COLOR_DIM_BLUE);
@@ -1128,7 +1151,7 @@ void loop() {
     String records  = bleGetRecords();
     bool   isEmpty  = bleGotEmpty();
 
-    Serial.println("BLE data — deviceId:[" + deviceId +
+    TSLOG("BLE data — deviceId:[" + deviceId +
                    "] len:" + String(records.length()) +
                    " empty:" + String(isEmpty));
 
@@ -1138,7 +1161,7 @@ void loop() {
 
     // ===== THEN HANDLE RECORDS =====
     if (isEmpty) {
-      Serial.println("BLE: VoltMon has no pending records");
+      TSLOG("BLE: VoltMon has no pending records");
       flashActivity(COLOR_CYAN, 2, 100);
     } else {
       setActivityLED(COLOR_WHITE);
@@ -1155,7 +1178,7 @@ void loop() {
           setUploadLED(COLOR_YELLOW);
         }
       } else {
-        Serial.println("WiFi down — records buffered");
+        TSLOG("WiFi down — records buffered");
         setUploadLED(COLOR_YELLOW);
         flashActivity(COLOR_RED, 2, 200);
       }
@@ -1164,12 +1187,12 @@ void loop() {
     setActivityLED(COLOR_DIM_BLUE);
   }
 
-// OTA push — VoltMon switches to server mode after records transfer
-  // Triggered by otaStreamPending which is set during the records connection
-  if (bleOtaStreamPending() && !collectorConnected && wifiConnected) {
+  // OTA push — VoltMon disconnects from records connection then switches to server mode
+  // Trigger: OTA was queued during records connection AND VoltMon has now disconnected
+  if (bleOtaStreamPending() && !collectorConnected) {
     bleOtaClearPending();
     bleOtaClearReady();
-    Serial.println("OTA push: scanning for VoltMon-OTA server...");
+    TSLOG("OTA push: VoltMon disconnected — scanning for VoltMon-OTA server");
     pushOTAToVoltMon();
     setActivityLED(COLOR_DIM_BLUE);
   }
@@ -1178,7 +1201,7 @@ void loop() {
   static unsigned long lastUploadRetry = 0;
   if (wifiConnected && hasPendingBuffer) {
     if (millis() - lastUploadRetry > COLLECTOR_UPLOAD_RETRY_MS) {
-      Serial.println("Retrying buffered upload...");
+      TSLOG("Retrying buffered upload...");
       setActivityLED(COLOR_CYAN);
       uploadBuffered();
       setActivityLED(COLOR_DIM_BLUE);
