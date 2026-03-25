@@ -255,8 +255,10 @@ void maintainWiFi() {
     delay(1000);
     if (connectWiFi() && cachedVoltMonVersion.length() == 0) {
       checkVoltMonFirmwareVersion();
+      if (cachedVoltMonVersion.length() > 0 && !voltmonFirmwareCached) {
+        downloadVoltMonFirmware();
+      }
       bleSetOtaAvailable();
-      bleUpdateAdvertising();
     }
   }
 }
@@ -1093,17 +1095,17 @@ void setup() {
 
   setupMQTT();
 
-  // Check VoltMon firmware version on startup
+  collectorBleInit();  // sets up server/characteristics but does NOT start advertising yet
+
+  // Check VoltMon firmware version and download if needed
   if (wifiConnected) {
     checkVoltMonFirmwareVersion();
+    if (cachedVoltMonVersion.length() > 0 && !voltmonFirmwareCached) {
+      downloadVoltMonFirmware();
+    }
   }
 
-  collectorBleInit();
-  // Download firmware to partition if available
-  if (cachedVoltMonVersion.length() > 0 && !voltmonFirmwareCached) {
-    downloadVoltMonFirmware();
-  }
-  // Single call to start advertising with manufacturer data
+  // Start BLE advertising AFTER WiFi work is done — shared radio on ESP32-C3
   bleSetOtaAvailable();
 
   Serial.println("Collector ready — waiting for VoltMon");
