@@ -107,6 +107,10 @@ static bool doOtaServerMode(size_t firmwareSize) {
   otaWriteOffset    = 0;
   otaPageUsed       = 0;
 
+  // Deinit client mode before starting as server
+  NimBLEDevice::deinit(true);
+  delay(200);
+
   // Start BLE server advertising "VoltMon-OTA"
   NimBLEDevice::init("VoltMon-OTA");
   NimBLEDevice::setMTU(512);

@@ -532,7 +532,7 @@ bool pushOTAToVoltMon() {
   NimBLEDevice::getAdvertising()->stop();
 
   // Give VoltMon time to deinit BLE client, init BLE server, start advertising
-  delay(3000);
+  delay(1000);
 
   // Scan with retries
   NimBLEAdvertisedDevice* voltmon = nullptr;
