@@ -133,7 +133,7 @@ static bool doOtaServerMode(size_t firmwareSize) {
   adv->setScanResponse(true);
   adv->start();
 
-  Serial.println("BLE OTA: Waiting for collector to connect and push firmware...");
+  Serial.println("BLE OTA: Waiting for collector to connect and push firmware..");
 
   unsigned long otaStart = millis();
   unsigned long lastLog  = millis();
